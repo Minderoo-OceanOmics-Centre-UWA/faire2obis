@@ -189,7 +189,7 @@ for (assay in names(INPUT_FILES)) {
       organismQuantityType = "DNA sequence reads",
       sampleSizeValue,
       sampleSizeUnit = "DNA sequence reads",
-      associatedSequences = NA_character_  # TODO: fill with raw sequence archive accession/link once available
+      associatedSequences = ASSOCIATED_SEQUENCES_URI
     )
 
   n_missing_name <- sum(is.na(occurrence$scientificName))

@@ -177,7 +177,12 @@ event_core <- real_samples %>%
     tidal_stage,
     water_current,
     samp_weather,
-    georeferenceSources = "OceanOmics field GPS",  # placeholder - adjust if a different source applies
+    # Left blank deliberately - the real GPS/positioning system used in
+    # the field hasn't been confirmed yet (may even vary by vessel, see
+    # the RV Investigator vs NA vessel split in the sample-tracking
+    # sheet). OK for a test-server upload; MUST be filled in with the
+    # confirmed source before this goes to the public/production IPT.
+    georeferenceSources = NA_character_,
     eventRemarks = site_comments
   )
 

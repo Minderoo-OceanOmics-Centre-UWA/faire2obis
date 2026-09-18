@@ -6,8 +6,7 @@
 # Sources:
 #   - taxaFinal$dna_sequence        -> DNA_sequence (the single most
 #                                       important field in this extension)
-#   - experimentRunMetadata         -> per-sample sequencing stats
-#                                       (associatedSequences, read counts)
+#   - experimentRunMetadata         -> per-sample read counts
 #   - projectMetadata (long format: term_name x assay1..assay4)
 #                                    -> per-assay PCR/primer/bioinformatics
 #                                       metadata, constant across all rows
@@ -15,6 +14,10 @@
 #   - Event core (output/event_core/Event.csv) -> env_broad_scale /
 #                                       env_local_scale / env_medium,
 #                                       joined back in via eventID
+#   - config.R's ASSOCIATED_SEQUENCES_URI -> associatedSequences (ENA
+#     project accession PRJEB107937, confirmed public 2026-09-18) -
+#     experimentRunMetadata's own associatedSequences column is empty
+#     for every row in this project (0/580 populated).
 #
 # NOTE: see config.R's ASSAY_PROJECT_COLUMN for the MiFishUE2
 # multi-assay-column mapping (confirmed project-specific decision -
@@ -123,9 +126,12 @@ for (assay in names(INPUT_FILES)) {
     select(seq_id, dna_sequence)
 
   # -- experiment run metadata (per-sample sequencing stats) -----------
+  # experimentRunMetadata's own associatedSequences column is empty for
+  # every row in this project (checked - 0/580 populated) - the real
+  # value comes from ASSOCIATED_SEQUENCES_URI (config.R) instead.
   exp_run <- read_faire_sheet(path, "experimentRunMetadata") %>%
     rename(eventID = samp_name) %>%
-    select(eventID, associatedSequences, input_read_count, output_read_count)
+    select(eventID, input_read_count, output_read_count)
   stopifnot(
     "experimentRunMetadata has more than one row for some sample(s) - joining as-is would duplicate DNA extension rows for those samples" =
       !any(duplicated(exp_run$eventID))
@@ -179,7 +185,7 @@ for (assay in names(INPUT_FILES)) {
       otu_db                        = assay_meta$otu_db,
       otu_seq_comp_appr             = assay_meta$otu_seq_comp_appr,
       sop                           = assay_meta$sop_bioinformatics,
-      associatedSequences,
+      associatedSequences           = ASSOCIATED_SEQUENCES_URI,
       input_read_count,
       output_read_count
     )

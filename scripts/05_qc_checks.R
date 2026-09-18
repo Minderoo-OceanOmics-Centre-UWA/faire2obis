@@ -37,19 +37,23 @@ cat("\n")
 any_failures <- FALSE
 
 # ----------------------------------------------------------------------
-# 1. Required fields present (Event core)
-# ----------------------------------------------------------------------
-cat("== check_fields: Event core ==\n")
-event_field_check <- check_fields(event, level = "event")
-print(event_field_check)
-if (nrow(event_field_check) > 0) any_failures <- TRUE
-
-# ----------------------------------------------------------------------
-# 2. Required fields present (each Occurrence table)
+# 1/2. Required fields present - obistools::check_fields() always checks
+#      one fixed combined list (eventDate, decimalLongitude,
+#      decimalLatitude, scientificName, scientificNameID,
+#      occurrenceStatus, basisOfRecord) regardless of what string is
+#      passed for `level` - it has no concept of an Event Core +
+#      Occurrence extension split, it was written for a flat, single-
+#      table Occurrence Core. Running it against the Event core alone
+#      or an Occurrence extension alone therefore always "fails" on the
+#      fields that live in the other table by design - not a real
+#      problem. The correct way to use it here is against a JOINED view
+#      (Occurrence + Event core by eventID), which is what actually has
+#      every required field together.
 # ----------------------------------------------------------------------
 for (n in names(occurrence_tables)) {
-  cat("\n== check_fields:", n, "==\n")
-  occ_field_check <- check_fields(occurrence_tables[[n]], level = "occurrence")
+  cat("\n== check_fields (Occurrence + Event core joined):", n, "==\n")
+  joined <- occurrence_tables[[n]] %>% left_join(event, by = "eventID")
+  occ_field_check <- check_fields(joined, level = "warning")
   print(occ_field_check)
   if (nrow(occ_field_check) > 0) any_failures <- TRUE
 }

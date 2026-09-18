@@ -17,6 +17,16 @@ EVENT_CORE_SOURCE_ASSAY <- "16SFishD"
 
 PROJECT_ID <- "OcOm_2408"
 
+# Raw sequence reads for this project are deposited at ENA under this
+# project accession (confirmed public as of 2026-09-18; cross-referenced
+# study accession ERP188796). experimentRunMetadata's own
+# associatedSequences column is empty for every row in this project's
+# FAIRe files (checked - 0/580 populated), and per-sample local FASTQ
+# filenames aren't publicly resolvable on their own, so this
+# project-level ENA link is used for every row instead. If per-sample
+# ENA run accessions become available, prefer those over this constant.
+ASSOCIATED_SEQUENCES_URI <- "https://www.ebi.ac.uk/ena/browser/view/PRJEB107937"
+
 # --------------------------------------------------------------------
 # Mapping: which projectMetadata assay column(s) apply to each of our
 # FAIRe files' assay_name.

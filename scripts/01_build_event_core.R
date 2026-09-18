@@ -124,7 +124,17 @@ cat("Control samples (-> controls/ reference file only):", nrow(control_samples)
 #   samp_collect_method / samp_collect_device -> samplingProtocol
 #   samp_size / samp_size_unit -> sampleSizeValue / sampleSizeUnit
 #   site_id -> locationID
+#   geo_loc_name -> kept as-is (MIxS term, populated locality string)
 #   verbatimLatitude/Longitude, verbatimCoordinateSystem, verbatimSRS -> kept as verbatim* fields
+#
+# Audited every other sampleMetadata column (146 total) against actual
+# data before deciding what else belongs here: the entire environmental
+# chemistry block (nutrients, chlorophyll, wind/light, etc.) and all DNA
+# extraction fields (nucl_acid_ext, concentration, samp_vol_we_dna_ext,
+# materialSampleID, etc.) are 0/628 populated in this project's FAIRe
+# files - not worth adding an eMoF extension or DNA-extension fields for
+# columns that are entirely empty. Re-check this if reusing the pipeline
+# for a project that actually fills those in.
 #
 # Anything not mapped here is left out of the Event core for now; if you
 # want to keep it, add it to `event_core` below or route it to eMoF if
@@ -144,12 +154,17 @@ event_core <- real_samples %>%
     verbatimCoordinateSystem,
     verbatimSRS,
     locationID = site_id,
+    geo_loc_name,
     minimumDepthInMeters = as.numeric(minimumDepthInMeters),
     maximumDepthInMeters = as.numeric(maximumDepthInMeters),
     env_broad_scale,
     env_local_scale,
     env_medium,
-    samplingProtocol = samp_collect_method,
+    # samp_collect_method is unpopulated in this project's data - the
+    # actual collection info lives in samp_collect_device instead (e.g.
+    # "Underway system"). Use whichever is populated rather than only
+    # samp_collect_method, so samplingProtocol isn't silently blank.
+    samplingProtocol = coalesce(samp_collect_method, samp_collect_device),
     sampleSizeValue  = samp_size,
     sampleSizeUnit   = samp_size_unit,
     habitat_natural_artificial_0_1,

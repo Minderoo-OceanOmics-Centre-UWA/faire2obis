@@ -35,6 +35,7 @@ for (n in names(dna_tables))        cat(" -", n, ":", nrow(dna_tables[[n]]), "ro
 cat("\n")
 
 any_failures <- FALSE
+any_skipped  <- character()
 
 # ----------------------------------------------------------------------
 # 1/2. Required fields present - obistools::check_fields() always checks
@@ -46,17 +47,36 @@ any_failures <- FALSE
 #      table Occurrence Core. Running it against the Event core alone
 #      or an Occurrence extension alone therefore always "fails" on the
 #      fields that live in the other table by design - not a real
-#      problem. The correct way to use it here is against a JOINED view
-#      (Occurrence + Event core by eventID), which is what actually has
-#      every required field together.
+#      problem. The correct way to use it here is against a combined
+#      view (Occurrence + Event core), which is what actually has every
+#      required field together - using obistools' own
+#      flatten_occurrence() for this (rather than a manual left_join)
+#      since it's the package's intended tool for exactly this: it only
+#      pulls in fields recognized as both event_fields() and
+#      occurrence_fields(), and self-checks eventID consistency first.
 # ----------------------------------------------------------------------
 for (n in names(occurrence_tables)) {
-  cat("\n== check_fields (Occurrence + Event core joined):", n, "==\n")
-  joined <- occurrence_tables[[n]] %>% left_join(event, by = "eventID")
+  cat("\n== check_fields (Occurrence + Event core, via flatten_occurrence):", n, "==\n")
+  joined <- flatten_occurrence(event, occurrence_tables[[n]])
   occ_field_check <- check_fields(joined, level = "warning")
   print(occ_field_check)
   if (nrow(occ_field_check) > 0) any_failures <- TRUE
 }
+
+# ----------------------------------------------------------------------
+# 2b. eventID uniqueness + parentEventID validity WITHIN the Event core
+#     itself (check_extension_eventids, used elsewhere in this script,
+#     only checks an extension against the core - it doesn't check the
+#     core's own internal consistency). Trivial here since
+#     parentEventID is always NA (no event hierarchy), but run it via
+#     the package's own function rather than just trusting script 01's
+#     row-count log, and to guard against regressions if a hierarchy is
+#     ever added later.
+# ----------------------------------------------------------------------
+cat("\n== check_eventids: Event core ==\n")
+eventid_check <- check_eventids(event)
+print(eventid_check)
+if (nrow(eventid_check) > 0) any_failures <- TRUE
 
 # ----------------------------------------------------------------------
 # 3. eventDate formatting
@@ -65,6 +85,39 @@ cat("\n== check_eventdate: Event core ==\n")
 date_check <- check_eventdate(event)
 print(date_check)
 if (nrow(date_check) > 0) any_failures <- TRUE
+
+# ----------------------------------------------------------------------
+# 3b. Depth vs. bathymetry (obistools::check_depth) - NOTE: this
+#     function has a confirmed bug in the currently-installed version
+#     (installed from GitHub iobis/obistools@HEAD): when the check
+#     finds zero row-level issues (a clean pass) and only has a
+#     column-level "empty"/"missing" diagnostic to report (our
+#     minimumDepthInMeters is 0/490 populated - single-point depth
+#     sampling, not a pipeline bug), it builds that diagnostic row with
+#     `row = NA` of type LOGICAL instead of integer, and the function's
+#     own final subsetting step (`original_data[sort(unique(na.omit(
+#     result$row))), ]`) then fails because a zero-length logical index
+#     isn't valid row subsetting in R. Reproduced directly against our
+#     data (with and without minimumDepthInMeters present) - not
+#     something fixable from this pipeline's side. Wrapped so this
+#     known upstream issue can't silently abort the rest of QC; if it
+#     ever returns a real result instead of erroring, that means the
+#     package was fixed/updated and the result should be reviewed.
+# ----------------------------------------------------------------------
+cat("\n== check_depth: Event core ==\n")
+depth_check <- tryCatch(
+  check_depth(event),
+  error = function(e) {
+    cat("  SKIPPED - known obistools::check_depth() bug (see script comment): ", conditionMessage(e), "\n", sep = "")
+    NULL
+  }
+)
+if (!is.null(depth_check)) {
+  print(depth_check)
+  if (nrow(depth_check) > 0) any_failures <- TRUE
+} else {
+  any_skipped <- c(any_skipped, "check_depth (depth vs. bathymetry) - NOT verified, see message above")
+}
 
 # ----------------------------------------------------------------------
 # 4. Coordinates on land / out of range
@@ -170,8 +223,12 @@ cat("\n=========================================\n")
 if (any_failures) {
   cat("QC CHECKS FOUND ISSUES - review the output above before publishing.\n")
 } else {
-  cat("All checks passed. Still: manually spot-check a sample of rows",
+  cat("All RUNNABLE checks passed. Still: manually spot-check a sample of rows",
       "before uploading to the IPT - a clean automated check is not a",
       "substitute for eyeballing real data.\n")
+}
+if (length(any_skipped) > 0) {
+  cat("\nSKIPPED (not run, not verified either way):\n")
+  for (s in any_skipped) cat("  -", s, "\n")
 }
 cat("=========================================\n")

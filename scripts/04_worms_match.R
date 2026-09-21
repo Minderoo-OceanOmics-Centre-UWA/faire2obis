@@ -10,6 +10,16 @@
 # AphiaRecordsByName / matchAphiaRecordsByNames services), the tool
 # recommended in the OBIS course for this exact task.
 #
+# NOT using obistools::match_taxa() here - checked its signature
+# (match_taxa(names, ask = TRUE)): it's an interactive tool that
+# prompts per-name for confirmation, built for a human reviewing a
+# small list live in an R session. It doesn't scale to running this
+# pipeline non-interactively (Rscript, ~670 names) with a saved audit
+# trail, which is what this script needs. The name_corrections /
+# manual_aphia_overrides / auto-resolve-on-single-accepted logic below
+# achieves the same "never guess" goal, just reproducibly and with
+# every resolution logged to output/worms_match/ for review.
+#
 # Output:
 #   - output/dna_extension/../ (not touched by this script)
 #   - Updates each Occurrence_<assay>.csv IN PLACE with scientificNameID

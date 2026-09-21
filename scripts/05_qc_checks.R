@@ -93,11 +93,31 @@ if (nrow(coord_out_of_range) > 0) {
 }
 
 # ----------------------------------------------------------------------
-# 5. eventID consistency between Event core and each extension
+# 5. eventID consistency between Event core and each extension -
+#    including the DNA Derived Data extension. This matters structurally,
+#    not just conceptually: in the actual DwC-A uploaded to the IPT,
+#    every extension links back to the CORE via the core's own id
+#    (eventID), never via another extension's id (occurrenceID) - there
+#    is no "extension of an extension" in DwC-A. A DNA extension file
+#    missing eventID would silently fail to join in IPT even though it
+#    looks fine in this pipeline (occurrenceID cross-check in step 6
+#    would still pass) - so check both extensions here explicitly.
 # ----------------------------------------------------------------------
 for (n in names(occurrence_tables)) {
-  cat("\n== check_extension_eventids:", n, "==\n")
+  cat("\n== check_extension_eventids (Occurrence):", n, "==\n")
   ext_check <- check_extension_eventids(event, occurrence_tables[[n]])
+  print(ext_check)
+  if (length(ext_check) > 0 && !all(is.na(ext_check))) any_failures <- TRUE
+}
+
+for (n in names(dna_tables)) {
+  cat("\n== check_extension_eventids (DNA Derived Data):", n, "==\n")
+  if (!"eventID" %in% names(dna_tables[[n]])) {
+    cat("  ERROR: no eventID column in this file - it cannot be linked to the Event core in IPT.\n")
+    any_failures <- TRUE
+    next
+  }
+  ext_check <- check_extension_eventids(event, dna_tables[[n]])
   print(ext_check)
   if (length(ext_check) > 0 && !all(is.na(ext_check))) any_failures <- TRUE
 }

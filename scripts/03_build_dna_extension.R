@@ -1,7 +1,16 @@
 ### 03_build_dna_extension.R
 #
 # Builds one Darwin Core DNA Derived Data extension table per assay,
-# linked to script 02's Occurrence tables via occurrenceID.
+# CONCEPTUALLY linked to script 02's Occurrence tables via occurrenceID
+# (a real column carried through for cross-referencing) - but
+# STRUCTURALLY, in the actual Darwin Core Archive uploaded to the IPT,
+# this extension must be attached to and joined against the Event
+# core, via eventID, same as the Occurrence extension. DwC-A has no
+# concept of "extension of an extension" - every extension's IPT "core
+# id" mapping has to be the core's own id (eventID here), never another
+# extension's id (occurrenceID would never match anything and the
+# whole extension would silently fail to join). Hence both eventID
+# AND occurrenceID are kept as columns below.
 #
 # Sources:
 #   - taxaFinal$dna_sequence        -> DNA_sequence (the single most
@@ -157,6 +166,14 @@ for (assay in names(INPUT_FILES)) {
     left_join(exp_run, by = "eventID") %>%
     left_join(event_core, by = "eventID") %>%
     transmute(
+      # eventID is required here as the archive's structural join key -
+      # in a DwC-A, every extension links back to the CORE via the
+      # core's own id (eventID for our Event core), never to another
+      # extension's id. occurrenceID stays too, as a plain data field
+      # for cross-referencing to the Occurrence extension row it
+      # belongs to, but IPT's "core id" mapping for this extension must
+      # use eventID, not occurrenceID - they'd never match.
+      eventID,
       occurrenceID,
       DNA_sequence = dna_sequence,
       env_broad_scale,

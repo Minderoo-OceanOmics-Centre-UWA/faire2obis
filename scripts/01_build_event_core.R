@@ -177,12 +177,14 @@ event_core <- real_samples %>%
     tidal_stage,
     water_current,
     samp_weather,
-    # Left blank deliberately - the real GPS/positioning system used in
-    # the field hasn't been confirmed yet (may even vary by vessel, see
-    # the RV Investigator vs NA vessel split in the sample-tracking
-    # sheet). OK for a test-server upload; MUST be filled in with the
-    # confirmed source before this goes to the public/production IPT.
-    georeferenceSources = NA_character_,
+    # Confirmed with the sample collection team: this project's samples
+    # were all collected on one expedition aboard RV Investigator
+    # (matches geo_loc_name "Pacific Ocean: East Australian Current"
+    # and voyage IN2024_V04). Primary onboard positioning system is
+    # Applanix PosMV (WaveMaster); secondary is Seapath 380+. ECDIS is
+    # the chartplotter (a display/planning tool, not a positioning
+    # sensor) - not cited as a source.
+    georeferenceSources = "RV Investigator onboard GPS positioning system (primary: Applanix PosMV WaveMaster; secondary: Seapath 380+)",
     eventRemarks = site_comments
   )
 

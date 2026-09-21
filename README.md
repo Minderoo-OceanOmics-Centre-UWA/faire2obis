@@ -142,7 +142,7 @@ This isn't a hypothetical pipeline — it's been run end-to-end against the OcOm
 | Corrected, then matched | 6 | Spelling fixes, stripped voucher/accession codes, and a wrong-kingdom homonym correction — each checked by hand against WoRMS and FishBase before applying |
 | Auto-resolved | 7 | WoRMS returned multiple records, but exactly one was marked `accepted` — resolved to WoRMS' own canonical record, not a guess |
 | Manually resolved | 1 | A cross-kingdom homonym with **two** `accepted` WoRMS records for genuinely different organisms (a fish genus and a red-algae genus sharing a name) — resolved by family, logged for audit |
-| Fixed rank placeholder | 1 | `Incertae sedis`, for the one case with no confident identification at any rank |
+| Fixed rank placeholder | 1 | `Biota incertae sedis` (WoRMS AphiaID 12's actual name, per OBIS's DNA-derived-data guidance), for the one case with no confident identification at any rank |
 | **Total** | **670** | **100% resolved · 0 left ambiguous · 0 unmatched** |
 
 Full audit trail, for review before publishing: `output/worms_match/matched_names.csv`, `ambiguous_resolved.csv`, `name_corrections_applied.csv`.

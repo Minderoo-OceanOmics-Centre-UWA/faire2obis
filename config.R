@@ -17,6 +17,15 @@ EVENT_CORE_SOURCE_ASSAY <- "16SFishD"
 
 PROJECT_ID <- "OcOm_2408"
 
+# Confirmed with the sample collection team: this project's samples
+# were all collected on one expedition aboard RV Investigator (matches
+# geo_loc_name "Pacific Ocean: East Australian Current" and voyage
+# IN2024_V04). Primary onboard positioning system is Applanix PosMV
+# (WaveMaster); secondary is Seapath 380+. ECDIS is the chartplotter (a
+# display/planning tool, not a positioning sensor) - not cited as a
+# source. Set as a constant across every Event core row.
+GEOREFERENCE_SOURCES <- "RV Investigator onboard GPS positioning system (primary: Applanix PosMV WaveMaster; secondary: Seapath 380+)"
+
 # Raw sequence reads for this project are deposited at ENA under this
 # project accession (confirmed public as of 2026-09-18; cross-referenced
 # study accession ERP188796). experimentRunMetadata's own

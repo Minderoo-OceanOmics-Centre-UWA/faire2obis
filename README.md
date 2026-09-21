@@ -16,18 +16,19 @@ FAIRe2OBIS solves this by building the archive the other way around:
 - **One Occurrence extension per assay** — the detections (ASVs) from each primer set, linked back to the Event core via `eventID`.
 - **One DNA Derived Data extension per assay** — the sequence, PCR, and bioinformatics metadata for each detection, linked via `occurrenceID` (and, for archive-level linking, `eventID`).
 
-```
-Event core (one row per physical sample)
-    |
-    +-- eventID --> Occurrence extension: Assay 1
-    |                   |
-    |                   +-- occurrenceID --> DNA Derived Data extension: Assay 1
-    |
-    +-- eventID --> Occurrence extension: Assay 2
-    |                   +-- occurrenceID --> DNA Derived Data extension: Assay 2
-    |
-    +-- eventID --> Occurrence extension: Assay N
-                        +-- occurrenceID --> DNA Derived Data extension: Assay N
+```mermaid
+flowchart TD
+    EC["Event core<br/>one row per physical sample"]
+    O1["Occurrence extension<br/>Assay 1"]
+    O2["Occurrence extension<br/>Assay 2"]
+    ON["Occurrence extension<br/>Assay N"]
+    D1["DNA Derived Data extension<br/>Assay 1"]
+    D2["DNA Derived Data extension<br/>Assay 2"]
+    DN["DNA Derived Data extension<br/>Assay N"]
+
+    EC -- eventID --> O1 -- occurrenceID --> D1
+    EC -- eventID --> O2 -- occurrenceID --> D2
+    EC -- eventID --> ON -- occurrenceID --> DN
 ```
 
 No sample metadata is duplicated across assays, and the resulting archive correctly represents "one sampling event, multiple assays run against it" rather than N unrelated datasets.
@@ -118,6 +119,46 @@ Also worth checking rather than assuming: which `sampleMetadata`/`taxaFinal` col
 - **Taxonomy matching is a separate, reviewable step**, not baked into the core-building scripts — so a human can check ambiguous or unmatched names before they enter a published archive.
 - **Control samples never reach the published archive.**
 - **Dates are never zero-padded** for unknown parts (e.g. `2011-03`, not `2011-03-00`) — a padded date asserts a day that was never actually recorded.
+
+## Validated against real data
+
+This isn't a hypothetical pipeline — it's been run end-to-end against the OcOm_2408 project's real FAIRe files (three assays, 628 total samples) and checked with [`obistools`](https://github.com/iobis/obistools) before being considered done.
+
+### Samples
+
+![Samples collected: 490 real samples in the archive, 131 negative controls and 7 positive controls excluded](docs/img/samples_breakdown.png)
+
+### Detections per assay
+
+![Detections per assay: 17,595 for 16SFishD, 32,234 for MarVer1, 18,600 for MiFishUE2](docs/img/detections_per_assay.png)
+
+### Taxonomy resolved without guessing
+
+670 unique scientific names went through WoRMS matching. Every one was resolved to a `scientificNameID` — none guessed:
+
+| Resolution | Names | How |
+|---|---:|---|
+| Matched directly | 655 | A single, unambiguous WoRMS record |
+| Corrected, then matched | 6 | Spelling fixes, stripped voucher/accession codes, and a wrong-kingdom homonym correction — each checked by hand against WoRMS and FishBase before applying |
+| Auto-resolved | 7 | WoRMS returned multiple records, but exactly one was marked `accepted` — resolved to WoRMS' own canonical record, not a guess |
+| Manually resolved | 1 | A cross-kingdom homonym with **two** `accepted` WoRMS records for genuinely different organisms (a fish genus and a red-algae genus sharing a name) — resolved by family, logged for audit |
+| Fixed rank placeholder | 1 | `Incertae sedis`, for the one case with no confident identification at any rank |
+| **Total** | **670** | **100% resolved · 0 left ambiguous · 0 unmatched** |
+
+Full audit trail, for review before publishing: `output/worms_match/matched_names.csv`, `ambiguous_resolved.csv`, `name_corrections_applied.csv`.
+
+### QC checks (`05_qc_checks.R`)
+
+- [x] Required Darwin Core fields present (Event + Occurrence combined)
+- [x] `eventID` unique in the Event core; `parentEventID` references valid
+- [x] `eventDate` format valid
+- [x] No zero, missing, or out-of-range coordinates
+- [x] No coordinates falling on land
+- [x] Every Occurrence and DNA Derived Data row's `eventID` exists in the Event core
+- [x] Every Occurrence row has a matching DNA Derived Data row, and vice versa
+- [x] 100% `scientificNameID` coverage
+
+*(Charts generated from real pipeline output by `scripts/make_readme_charts.R`, using `ggplot2` — rerun it after reprocessing a new dataset to refresh the numbers.)*
 
 ## License
 

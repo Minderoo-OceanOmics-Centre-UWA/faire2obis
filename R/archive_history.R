@@ -87,11 +87,14 @@ save_archive_to_s3 <- function(zip_path, project_id, assay_names = NULL) {
 #'
 #' @return data.frame with columns last_modified, path (key with the
 #'   public prefix stripped, for display), size_mb (display string),
-#'   s3_key (full key, not for display - used for download)
+#'   s3_key (full key, not for display - used for download); project
+#'   (the top-level folder the file lives under, i.e. the project id -
+#'   the first path segment, e.g. "OcOm_2408" for
+#'   "OcOm_2408/OcOm2408_CoreVersion.zip")
 list_archive_history <- function() {
   bucket <- s3_bucket_name()
   empty <- data.frame(
-    last_modified = character(), path = character(),
+    last_modified = character(), project = character(), path = character(),
     size_mb = character(), s3_key = character(),
     stringsAsFactors = FALSE
   )
@@ -105,9 +108,11 @@ list_archive_history <- function() {
   objects <- objects[objects$Size > 0, , drop = FALSE]
   if (nrow(objects) == 0) return(empty)
 
+  rel_path <- sub(paste0("^", prefix), "", objects$Key)
   df <- data.frame(
     last_modified = objects$LastModified,
-    path          = sub(paste0("^", prefix), "", objects$Key),
+    project       = sub("/.*$", "", rel_path),
+    path          = rel_path,
     size_mb       = sprintf("%.1f MB", objects$Size / 1024^2),
     s3_key        = objects$Key,
     stringsAsFactors = FALSE

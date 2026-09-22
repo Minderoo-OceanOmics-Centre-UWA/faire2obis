@@ -97,7 +97,7 @@ app_css <- "
      stays a constant, quiet backdrop rather than scrolling past. Very
      low opacity by design - texture, not a picture to look at. */
   .ocean-bg-layer {
-    position: fixed; inset: 0; z-index: -1; opacity: 0.16;
+    position: fixed; inset: 0; z-index: -1; opacity: 0.09;
     pointer-events: none; overflow: hidden;
   }
   .ocean-bg-layer svg { width: 100%; height: 100%; }
@@ -1765,9 +1765,11 @@ server <- function(input, output, session) {
     df <- archive_history_df()
     req(df)
     DT::datatable(
-      df[, c("last_modified", "path", "size_mb")],
-      selection = "single", rownames = FALSE,
-      colnames = c("Last modified (UTC)", "Path", "Size"),
+      df[, c("last_modified", "project", "path", "size_mb")],
+      selection = "single", rownames = TRUE,
+      # Positional, not named - with rownames = TRUE the row-number
+      # column comes first with no real underlying column to name-map to.
+      colnames = c("No.", "Last modified (UTC)", "Project", "Path", "Size"),
       options = list(pageLength = 15, dom = "tip")
     )
   })

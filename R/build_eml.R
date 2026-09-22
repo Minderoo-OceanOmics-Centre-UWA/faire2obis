@@ -41,6 +41,7 @@ person_xml <- function(tag, person, role = NULL) {
     if (nzchar(xml_escape(person$admin_area)))     paste0("\t\t\t\t<administrativeArea>", xml_escape(person$admin_area), "</administrativeArea>\n") else "",
     if (nzchar(xml_escape(person$country)))        paste0("\t\t\t\t<country>", xml_escape(person$country), "</country>\n") else "",
     "\t\t\t</address>\n",
+    if (nzchar(xml_escape(person$phone))) paste0("\t\t\t<phone>", xml_escape(person$phone), "</phone>\n") else "",
     if (nzchar(xml_escape(person$email))) paste0("\t\t\t<electronicMailAddress>", xml_escape(person$email), "</electronicMailAddress>\n") else "",
     if (!is.null(role) && nzchar(role))   paste0("\t\t\t<role>", xml_escape(role), "</role>\n") else "",
     "\t\t</", tag, ">\n"
@@ -56,10 +57,17 @@ random_uuid <- function() {
 #'
 #' @param package_id A UUID for this metadata package (auto-generated if NULL)
 #' @param title Dataset title
-#' @param creator,metadata_provider,contact Person lists with elements:
-#'   given_name, sur_name, organization, position, email, delivery_point,
-#'   city, admin_area, country
-#' @param associated_party Optional person list (as above) plus `role`, or NULL
+#' @param creator A LIST of person lists - one <creator> element per entry,
+#'   in order (EML allows multiple creators; a dataset commonly has several).
+#'   Each person list has: given_name, sur_name, organization, position,
+#'   email, phone, delivery_point, city, admin_area, country
+#' @param metadata_provider,contact A single person list (same elements as
+#'   above) - EML only ever has one of each of these, unlike creator
+#' @param associated_party A LIST of person lists (as `creator`), each with
+#'   an optional `role` element (defaults to "PUBLISHER") - one
+#'   <associatedParty> element per entry. A dataset commonly credits
+#'   several people here in different roles (author, editor, reviewer,
+#'   processor, curator, programmer, content provider, ...)
 #' @param pub_date Publication date (Date or "YYYY-MM-DD" string)
 #' @param abstract_paragraphs Character vector - one <para> per element
 #' @param keywords Character vector
@@ -70,13 +78,18 @@ random_uuid <- function() {
 #' @param project_id,project_title,project_abstract,funding,
 #'   study_area_description,design_description Free text project fields
 #'   (project block omitted entirely if project_id is NULL/empty)
+#' @param project_personnel A LIST of person lists (as `creator`), each with
+#'   an optional `role` element (defaults to "POINT_OF_CONTACT") - one
+#'   <personnel> element per entry inside <project>. Independent of
+#'   `creator`/`contact` - a project's personnel can be different people
+#'   in different roles. Ignored if project_id is NULL/empty.
 #' @return A single character string: the complete eml.xml document
 build_eml_xml <- function(package_id = NULL,
                            title,
                            creator,
                            metadata_provider,
                            contact,
-                           associated_party = NULL,
+                           associated_party = list(),
                            pub_date = Sys.Date(),
                            abstract_paragraphs,
                            keywords = character(),
@@ -91,7 +104,8 @@ build_eml_xml <- function(package_id = NULL,
                            project_abstract = NULL,
                            funding = NULL,
                            study_area_description = NULL,
-                           design_description = NULL) {
+                           design_description = NULL,
+                           project_personnel = list()) {
 
   if (is.null(package_id) || !nzchar(package_id)) package_id <- random_uuid()
 
@@ -118,8 +132,14 @@ build_eml_xml <- function(package_id = NULL,
     )
   }, character(1)), collapse = "")
 
-  associated_party_xml <- if (!is.null(associated_party)) {
-    person_xml("associatedParty", associated_party, role = if (!is.null(associated_party$role) && nzchar(associated_party$role)) associated_party$role else "PUBLISHER")
+  # Zero or more people with a role on the DATASET (as opposed to
+  # project_personnel, which is project-specific) - a real dataset
+  # commonly credits several people in different roles (author, editor,
+  # reviewer, processor, curator, programmer, content provider, ...).
+  associated_party_xml <- if (length(associated_party) > 0) {
+    paste(vapply(associated_party, function(p) {
+      person_xml("associatedParty", p, role = if (!is.null(p$role) && nzchar(p$role)) p$role else "PUBLISHER")
+    }, character(1)), collapse = "")
   } else ""
 
   distribution_xml <- if (!is.null(distribution_url) && nzchar(distribution_url)) {
@@ -128,10 +148,23 @@ build_eml_xml <- function(package_id = NULL,
     )
   } else ""
 
+  # The project's personnel - zero or more people with a role on THIS
+  # project specifically (EML schema: project/personnel comes right
+  # after project/title, before abstract). A separate list from
+  # `creator`/`contact`, since a project's personnel commonly differ in
+  # number and role from the dataset-level people (e.g. a point of
+  # contact who isn't a creator, or several people with different roles).
+  project_personnel_xml <- if (!is.null(project_id) && nzchar(project_id) && length(project_personnel) > 0) {
+    paste(vapply(project_personnel, function(p) {
+      person_xml("personnel", p, role = if (!is.null(p$role) && nzchar(p$role)) p$role else "POINT_OF_CONTACT")
+    }, character(1)), collapse = "")
+  } else ""
+
   project_xml <- if (!is.null(project_id) && nzchar(project_id)) {
     paste0(
       "\t<project id=\"", xml_escape(project_id), "\">\n",
       "\t\t<title>", xml_escape(project_title), "</title>\n",
+      project_personnel_xml,
       "\t\t<abstract>\n\t\t\t<para>", xml_escape(project_abstract), "</para>\n\t\t</abstract>\n",
       if (!is.null(funding) && nzchar(funding)) paste0("\t\t<funding>\n\t\t\t<para>", xml_escape(funding), "</para>\n\t\t</funding>\n") else "",
       if (!is.null(study_area_description) && nzchar(study_area_description)) paste0(
@@ -155,7 +188,7 @@ build_eml_xml <- function(package_id = NULL,
     '         xml:lang="eng">\n',
     '\t<dataset>\n',
     '\t\t<title>', xml_escape(title), '</title>\n',
-    person_xml("creator", creator),
+    paste(vapply(creator, function(p) person_xml("creator", p), character(1)), collapse = ""),
     person_xml("metadataProvider", metadata_provider),
     associated_party_xml,
     '\t\t<pubDate>\n\t\t  ', format(as.Date(pub_date), "%Y-%m-%d"), '\n\t\t  </pubDate>\n',

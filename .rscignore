@@ -1,0 +1,17 @@
+# Excludes files from the shinyapps.io deploy bundle (rsconnect::deployApp()).
+# app.R only needs R/, config.R, and templates/ to run - everything below
+# is local dev data/output/version control, not app code.
+#
+# NOTE: rsconnect matches these as EXACT top-level names (plain setdiff(),
+# not gitignore-style globs) - no trailing slashes, no wildcards, no
+# nested paths. See rsconnect:::ignoreBundleFiles.
+
+data
+output
+FAIRe2OBIS
+scripts
+docs
+CLAUDE.md
+README.md
+.RData
+.claude

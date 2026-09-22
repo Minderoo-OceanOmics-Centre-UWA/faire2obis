@@ -45,6 +45,7 @@ source("R/worms_match.R")
 source("R/qc_checks.R")
 source("R/build_eml.R")
 source("R/eml_excel.R")
+source("R/archive_history.R")
 
 # Converts a scientific name into a safe Shiny input-id fragment (no
 # spaces/punctuation) for the Step 4 per-name review widgets.
@@ -163,6 +164,86 @@ assay_row_ui <- function(i) {
   )
 }
 
+# One Step 6 creator row's markup - same insertUI/removeUI pattern as
+# assay_row_ui above (safe here because step6_body's renderUI has no
+# reactive dependency and only ever runs once, so rows added later
+# never get wiped out by a re-render). EML allows multiple <creator>
+# elements per dataset. Each creator has their OWN organization/address
+# fields (NOT the shared "Organization / address" block below, which is
+# only for metadata provider/contact/associated party/project personnel)
+# - real multi-author datasets commonly have co-authors at different
+# institutions (e.g. a funder's staff alongside the university team).
+creator_row_ui <- function(i) {
+  div(id = paste0("creator_row_", i), class = "assay-row",
+      fluidRow(
+        column(3, textInput(paste0("eml_creator_given_", i), "Given name")),
+        column(3, textInput(paste0("eml_creator_sur_", i), "Surname")),
+        column(3, textInput(paste0("eml_creator_email_", i), "Email")),
+        column(2, textInput(paste0("eml_creator_position_", i), "Position (optional)")),
+        column(1, style = "padding-top: 32px;",
+               actionButton(paste0("remove_creator_", i), bsicons::bs_icon("x-lg"), class = "btn-sm btn-outline-danger"))
+      ),
+      fluidRow(
+        column(3, textInput(paste0("eml_creator_org_", i), "Organization (optional)")),
+        column(3, textInput(paste0("eml_creator_address_", i), "Street address (optional)")),
+        column(2, textInput(paste0("eml_creator_city_", i), "City (optional)")),
+        column(2, textInput(paste0("eml_creator_admin_area_", i), "State/region (optional)")),
+        column(1, textInput(paste0("eml_creator_country_", i), "Country")),
+        column(1, textInput(paste0("eml_creator_phone_", i), "Phone"))
+      )
+  )
+}
+
+# One Step 6 project-personnel row's markup - same insertUI/removeUI
+# pattern as creator_row_ui. Unlike creators, personnel SHARE the
+# "Organization / address" block below (matches the reference sample:
+# project personnel used the same UWA address as the associated party,
+# not a separate one) - each row just needs its own name/position/
+# email/role, since one project commonly lists several people in
+# different roles (point of contact, curator, etc.).
+personnel_row_ui <- function(i) {
+  div(id = paste0("personnel_row_", i), class = "assay-row",
+      fluidRow(
+        column(3, textInput(paste0("eml_personnel_given_", i), "Given name")),
+        column(3, textInput(paste0("eml_personnel_sur_", i), "Surname")),
+        column(3, textInput(paste0("eml_personnel_email_", i), "Email")),
+        column(2, textInput(paste0("eml_personnel_position_", i), "Position (optional)")),
+        column(1, style = "padding-top: 32px;",
+               actionButton(paste0("remove_personnel_", i), bsicons::bs_icon("x-lg"), class = "btn-sm btn-outline-danger"))
+      ),
+      fluidRow(
+        column(3, textInput(paste0("eml_personnel_role_", i), "Role",
+                             value = "POINT_OF_CONTACT", placeholder = "e.g. POINT_OF_CONTACT, CURATOR, AUTHOR"))
+      )
+  )
+}
+
+# One Step 6 associated-party row's markup - same pattern as
+# personnel_row_ui (shares the "Organization / address" block). A
+# dataset commonly credits several people here, each in a DIFFERENT
+# role - the full role vocabulary EML/GBIF recognise is listed in the
+# dropdown below so every "position type" this project might use
+# (author, editor, reviewer, processor, curator, programmer, content
+# provider, ...) is visible as an option, not just typed from memory.
+ap_row_ui <- function(i) {
+  div(id = paste0("ap_row_", i), class = "assay-row",
+      fluidRow(
+        column(3, textInput(paste0("eml_ap_given_", i), "Given name (optional)")),
+        column(3, textInput(paste0("eml_ap_sur_", i), "Surname (optional)")),
+        column(3, textInput(paste0("eml_ap_email_", i), "Email (optional)")),
+        column(2, textInput(paste0("eml_ap_position_", i), "Position (optional)")),
+        column(1, style = "padding-top: 32px;",
+               actionButton(paste0("remove_ap_", i), bsicons::bs_icon("x-lg"), class = "btn-sm btn-outline-danger"))
+      ),
+      fluidRow(
+        column(4, selectInput(paste0("eml_ap_role_", i), "Role", choices = c(
+          "PUBLISHER", "AUTHOR", "CONTENT_PROVIDER", "CURATOR", "EDITOR",
+          "OWNER", "POINT_OF_CONTACT", "PROCESSOR", "PROGRAMMER", "REVIEWER"
+        )))
+      )
+  )
+}
+
 # =======================================================================
 # UI
 # =======================================================================
@@ -213,47 +294,62 @@ ui <- page_fluid(
                    class = "btn btn-outline-light btn-sm restart-btn")
   ),
 
-  div(uiOutput("stepper_ui")),
+  # Top-level tab bar: "Generate" (the step wizard) and "History" (past
+  # archives, independent of wherever the wizard currently is) - the two
+  # main sections of the app. History's own content lives in a dedicated
+  # uiOutput (history_tab_body) so switching tabs never disturbs wizard
+  # state, the same reasoning as each step having its own renderUI.
+  navset_tab(
+    id = "main_tab",
+    nav_panel(
+      "Generate",
+      div(uiOutput("stepper_ui")),
 
-  div(class = "content-wrap",
-      # Step 1 is fully static (no renderUI) - its assay rows are
-      # managed imperatively via insertUI/removeUI, and must never be
-      # regenerated wholesale (see architecture note above).
-      conditionalPanel(
-        condition = "output.current_step_num == '1'",
-        card(
-          card_header(bsicons::bs_icon("folder2-open", class = "section-icon"), "Project"),
-          card_body(
-            textInput("project_id", "Project ID", value = "", placeholder = "e.g. OcOm_2408"),
-            p(class = "muted", "Used as a label only at this stage - not yet embedded into output filenames.")
-          )
-        ),
-        card(
-          card_header(bsicons::bs_icon("file-earmark-spreadsheet", class = "section-icon"), "Assay files"),
-          card_body(
-            p(class = "muted", "Add one FAIRe .xlsx file per assay run on this project's samples. All assays must share the same physical samples."),
-            div(id = "assay_rows_container", assay_row_ui(1)),
-            actionButton("add_assay", tagList(bsicons::bs_icon("plus-lg"), " Add another assay"), class = "btn-outline-secondary btn-sm")
-          )
-        ),
-        card(
-          card_header(bsicons::bs_icon("sliders", class = "section-icon"), "Sample handling"),
-          card_body(
-            textInput("sample_category_keep", "Value of samp_category that marks a REAL (non-control) sample", value = "sample"),
-            p(class = "muted", "Everything else (e.g. \"negative control\", \"positive control\") is excluded from the published archive.")
-          )
-        ),
-        div(style = "text-align: right; margin-top: 10px;",
-            actionButton("to_step2", tagList("Validate files ", bsicons::bs_icon("arrow-right")), class = "btn-primary")
-        )
-      ),
+      div(class = "content-wrap",
+          # Step 1 is fully static (no renderUI) - its assay rows are
+          # managed imperatively via insertUI/removeUI, and must never be
+          # regenerated wholesale (see architecture note above).
+          conditionalPanel(
+            condition = "output.current_step_num == '1'",
+            card(
+              card_header(bsicons::bs_icon("folder2-open", class = "section-icon"), "Project"),
+              card_body(
+                textInput("project_id", "Project ID", value = "", placeholder = "e.g. OcOm_2408"),
+                p(class = "muted", "Used as a label only at this stage - not yet embedded into output filenames.")
+              )
+            ),
+            card(
+              card_header(bsicons::bs_icon("file-earmark-spreadsheet", class = "section-icon"), "Assay files"),
+              card_body(
+                p(class = "muted", "Add one FAIRe .xlsx file per assay run on this project's samples. All assays must share the same physical samples."),
+                div(id = "assay_rows_container", assay_row_ui(1)),
+                actionButton("add_assay", tagList(bsicons::bs_icon("plus-lg"), " Add another assay"), class = "btn-outline-secondary btn-sm")
+              )
+            ),
+            card(
+              card_header(bsicons::bs_icon("sliders", class = "section-icon"), "Sample handling"),
+              card_body(
+                textInput("sample_category_keep", "Value of samp_category that marks a REAL (non-control) sample", value = "sample"),
+                p(class = "muted", "Everything else (e.g. \"negative control\", \"positive control\") is excluded from the published archive.")
+              )
+            ),
+            div(style = "text-align: right; margin-top: 10px;",
+                actionButton("to_step2", tagList("Validate files ", bsicons::bs_icon("arrow-right")), class = "btn-primary")
+            )
+          ),
 
-      conditionalPanel(condition = "output.current_step_num == '2'", uiOutput("step2_body")),
-      conditionalPanel(condition = "output.current_step_num == '3'", uiOutput("step3_body")),
-      conditionalPanel(condition = "output.current_step_num == '4'", uiOutput("step4_body")),
-      conditionalPanel(condition = "output.current_step_num == '5'", uiOutput("step5_body")),
-      conditionalPanel(condition = "output.current_step_num == '6'", uiOutput("step6_body")),
-      conditionalPanel(condition = "output.current_step_num == '7'", uiOutput("step7_body"))
+          conditionalPanel(condition = "output.current_step_num == '2'", uiOutput("step2_body")),
+          conditionalPanel(condition = "output.current_step_num == '3'", uiOutput("step3_body")),
+          conditionalPanel(condition = "output.current_step_num == '4'", uiOutput("step4_body")),
+          conditionalPanel(condition = "output.current_step_num == '5'", uiOutput("step5_body")),
+          conditionalPanel(condition = "output.current_step_num == '6'", uiOutput("step6_body")),
+          conditionalPanel(condition = "output.current_step_num == '7'", uiOutput("step7_body"))
+      )
+    ),
+    nav_panel(
+      "History",
+      div(class = "content-wrap", uiOutput("history_tab_body"))
+    )
   )
 )
 
@@ -266,6 +362,12 @@ server <- function(input, output, session) {
     current_step    = 1,
     assay_ids       = c(1),   # currently-visible assay row ids, in order added
     next_assay_id   = 2,      # ever-increasing - ids are never reused
+    creator_ids     = c(1),   # currently-visible Step 6 creator row ids, in order added
+    next_creator_id = 2,      # ever-increasing - ids are never reused
+    personnel_ids     = c(1), # currently-visible Step 6 project-personnel row ids
+    next_personnel_id = 2,    # ever-increasing - ids are never reused
+    ap_ids          = c(1),   # currently-visible Step 6 associated-party row ids (can go to zero - optional)
+    next_ap_id      = 2,      # ever-increasing - ids are never reused
     validation      = NULL,
     answers         = list(georeference_sources = NA_character_, associated_sequences_uri = NA_character_),
     build_result    = NULL,   # list(event_core, controls, occurrence, dna_extension)
@@ -276,6 +378,11 @@ server <- function(input, output, session) {
     qc_result       = NULL,  # run_qc_checks() output
     eml_xml         = NULL   # build_eml_xml() output (Step 6)
   )
+
+  # Bumped after a successful save_archive_to_s3() to invalidate the
+  # Step 7 history table so a newly-generated archive shows up without
+  # requiring a manual page refresh.
+  history_refresh <- reactiveVal(0)
 
   output$current_step_num <- renderText({ as.character(rv$current_step) })
   outputOptions(output, "current_step_num", suspendWhenHidden = FALSE)
@@ -352,6 +459,126 @@ server <- function(input, output, session) {
     rv$assay_ids <- c(rv$assay_ids, new_id)
     rv$next_assay_id <- new_id + 1
   })
+
+  # ---- Step 6 creator row management (same insertUI/removeUI pattern) ----
+  setup_creator_remove_handler <- function(id) {
+    local({
+      this_id <- id
+      observeEvent(input[[paste0("remove_creator_", this_id)]], {
+        if (length(rv$creator_ids) <= 1) {
+          showNotification("At least one creator is required.", type = "warning")
+          return()
+        }
+        removeUI(selector = paste0("#creator_row_", this_id))
+        rv$creator_ids <- setdiff(rv$creator_ids, this_id)
+      }, ignoreInit = TRUE, once = TRUE)
+    })
+  }
+  setup_creator_remove_handler(1)  # the row already in the static UI
+
+  observeEvent(input$add_creator, {
+    new_id <- rv$next_creator_id
+    insertUI(selector = "#creator_rows_container", where = "beforeEnd", ui = creator_row_ui(new_id))
+    setup_creator_remove_handler(new_id)
+    rv$creator_ids <- c(rv$creator_ids, new_id)
+    rv$next_creator_id <- new_id + 1
+  })
+
+  # Rebuilds the creator rows to match a freshly-uploaded metadata Excel's
+  # "creators" sheet: clears every row but the first (kept and reused so
+  # there's always at least one), adds however many more are needed, then
+  # returns the id list so the caller can updateTextInput() each one.
+  set_creator_rows <- function(n) {
+    for (id in setdiff(rv$creator_ids, 1)) removeUI(selector = paste0("#creator_row_", id))
+    rv$creator_ids <- c(1)
+    n <- max(n, 1)
+    while (length(rv$creator_ids) < n) {
+      new_id <- rv$next_creator_id
+      insertUI(selector = "#creator_rows_container", where = "beforeEnd", ui = creator_row_ui(new_id))
+      setup_creator_remove_handler(new_id)
+      rv$creator_ids <- c(rv$creator_ids, new_id)
+      rv$next_creator_id <- new_id + 1
+    }
+    rv$creator_ids
+  }
+
+  # ---- Step 6 project-personnel row management (same pattern again) -----
+  setup_personnel_remove_handler <- function(id) {
+    local({
+      this_id <- id
+      observeEvent(input[[paste0("remove_personnel_", this_id)]], {
+        if (length(rv$personnel_ids) <= 1) {
+          showNotification("At least one person is required (or remove the Project ID to omit personnel entirely).", type = "warning")
+          return()
+        }
+        removeUI(selector = paste0("#personnel_row_", this_id))
+        rv$personnel_ids <- setdiff(rv$personnel_ids, this_id)
+      }, ignoreInit = TRUE, once = TRUE)
+    })
+  }
+  setup_personnel_remove_handler(1)
+
+  observeEvent(input$add_personnel, {
+    new_id <- rv$next_personnel_id
+    insertUI(selector = "#personnel_rows_container", where = "beforeEnd", ui = personnel_row_ui(new_id))
+    setup_personnel_remove_handler(new_id)
+    rv$personnel_ids <- c(rv$personnel_ids, new_id)
+    rv$next_personnel_id <- new_id + 1
+  })
+
+  set_personnel_rows <- function(n) {
+    for (id in setdiff(rv$personnel_ids, 1)) removeUI(selector = paste0("#personnel_row_", id))
+    rv$personnel_ids <- c(1)
+    n <- max(n, 1)
+    while (length(rv$personnel_ids) < n) {
+      new_id <- rv$next_personnel_id
+      insertUI(selector = "#personnel_rows_container", where = "beforeEnd", ui = personnel_row_ui(new_id))
+      setup_personnel_remove_handler(new_id)
+      rv$personnel_ids <- c(rv$personnel_ids, new_id)
+      rv$next_personnel_id <- new_id + 1
+    }
+    rv$personnel_ids
+  }
+
+  # ---- Step 6 associated-party row management (same pattern, but this
+  # one is allowed to go all the way to ZERO rows - associated parties
+  # are fully optional, unlike creators/personnel) ----------------------
+  setup_ap_remove_handler <- function(id) {
+    local({
+      this_id <- id
+      observeEvent(input[[paste0("remove_ap_", this_id)]], {
+        removeUI(selector = paste0("#ap_row_", this_id))
+        rv$ap_ids <- setdiff(rv$ap_ids, this_id)
+      }, ignoreInit = TRUE, once = TRUE)
+    })
+  }
+  setup_ap_remove_handler(1)
+
+  observeEvent(input$add_ap, {
+    new_id <- rv$next_ap_id
+    insertUI(selector = "#ap_rows_container", where = "beforeEnd", ui = ap_row_ui(new_id))
+    setup_ap_remove_handler(new_id)
+    rv$ap_ids <- c(rv$ap_ids, new_id)
+    rv$next_ap_id <- new_id + 1
+  })
+
+  # Removes every currently-visible row (whatever ids they happen to be -
+  # row 1 might already be gone, since ap rows can be removed down to
+  # zero) and inserts exactly `n` fresh ones with new ids. Simpler and
+  # more robust than reusing id 1 specially, which only worked for
+  # creators/personnel because those can never be removed below one.
+  set_ap_rows <- function(n) {
+    for (id in rv$ap_ids) removeUI(selector = paste0("#ap_row_", id))
+    rv$ap_ids <- integer(0)
+    while (length(rv$ap_ids) < n) {
+      new_id <- rv$next_ap_id
+      insertUI(selector = "#ap_rows_container", where = "beforeEnd", ui = ap_row_ui(new_id))
+      setup_ap_remove_handler(new_id)
+      rv$ap_ids <- c(rv$ap_ids, new_id)
+      rv$next_ap_id <- new_id + 1
+    }
+    rv$ap_ids
+  }
 
   get_input_files <- reactive({
     files <- list()
@@ -977,14 +1204,11 @@ server <- function(input, output, session) {
             column(4, textInput("eml_org_admin_area", "State/region")),
             column(4, textInput("eml_org_country", "Country code (e.g. AU)"))
           ),
+          textInput("eml_org_phone", "Phone number (optional)"),
           tags$hr(),
-          strong("Creator"), p(class = "muted", "The person/team who generated this dataset."),
-          fluidRow(
-            column(3, textInput("eml_creator_given", "Given name")),
-            column(3, textInput("eml_creator_sur", "Surname")),
-            column(3, textInput("eml_creator_position", "Position")),
-            column(3, textInput("eml_creator_email", "Email"))
-          ),
+          strong("Creator(s)"), p(class = "muted", "The person/people who generated this dataset - add one row per creator."),
+          div(id = "creator_rows_container", creator_row_ui(1)),
+          actionButton("add_creator", tagList(bsicons::bs_icon("plus-lg"), " Add another creator"), class = "btn-outline-secondary btn-sm"),
           tags$hr(),
           checkboxInput("eml_mp_same", "Metadata provider is the same person as the creator", value = TRUE),
           conditionalPanel(condition = "input.eml_mp_same == false",
@@ -1008,16 +1232,9 @@ server <- function(input, output, session) {
             )
           ),
           tags$hr(),
-          checkboxInput("eml_ap_include", "Include an additional associated party (e.g. publisher)", value = FALSE),
-          conditionalPanel(condition = "input.eml_ap_include == true",
-            fluidRow(
-              column(3, textInput("eml_ap_given", "Given name")),
-              column(3, textInput("eml_ap_sur", "Surname")),
-              column(3, textInput("eml_ap_position", "Position")),
-              column(3, textInput("eml_ap_email", "Email"))
-            ),
-            selectInput("eml_ap_role", "Role", choices = c("PUBLISHER", "AUTHOR", "PROCESSOR", "EDITOR", "REVIEWER", "OWNER"))
-          )
+          strong("Associated parties (optional)"), p(class = "muted", "Other people credited on this dataset, each with their own role - author, editor, reviewer, processor, curator, programmer, content provider, publisher, and more. Shares the Organization/address block above. Remove all rows to omit entirely."),
+          div(id = "ap_rows_container", ap_row_ui(1)),
+          actionButton("add_ap", tagList(bsicons::bs_icon("plus-lg"), " Add another associated party"), class = "btn-outline-secondary btn-sm")
         )
       ),
       card(
@@ -1038,7 +1255,11 @@ server <- function(input, output, session) {
           textAreaInput("eml_project_abstract", "Project abstract", rows = 2),
           textInput("eml_funding", "Funding"),
           textAreaInput("eml_study_area_desc", "Study area description", rows = 2),
-          textAreaInput("eml_design_desc", "Design description", rows = 2)
+          textAreaInput("eml_design_desc", "Design description", rows = 2),
+          tags$hr(),
+          strong("Project personnel"), p(class = "muted", "People with a role on this project specifically (e.g. point of contact, curator) - shares the Organization/address block above. Only used if Project ID is filled in."),
+          div(id = "personnel_rows_container", personnel_row_ui(1)),
+          actionButton("add_personnel", tagList(bsicons::bs_icon("plus-lg"), " Add another person"), class = "btn-outline-secondary btn-sm")
         )
       ),
       div(class = "nav-row",
@@ -1078,6 +1299,51 @@ server <- function(input, output, session) {
         select   = updateSelectInput(session, input_id, selected = val)
       )
     }
+
+    creators <- parsed$creators
+    if (!is.null(creators) && length(creators) > 0) {
+      ids <- set_creator_rows(length(creators))
+      for (i in seq_along(ids)) {
+        c <- creators[[i]]
+        updateTextInput(session, paste0("eml_creator_given_", ids[i]), value = c$given_name %||% "")
+        updateTextInput(session, paste0("eml_creator_sur_", ids[i]), value = c$sur_name %||% "")
+        updateTextInput(session, paste0("eml_creator_position_", ids[i]), value = c$position %||% "")
+        updateTextInput(session, paste0("eml_creator_email_", ids[i]), value = c$email %||% "")
+        updateTextInput(session, paste0("eml_creator_org_", ids[i]), value = c$organization %||% "")
+        updateTextInput(session, paste0("eml_creator_address_", ids[i]), value = c$delivery_point %||% "")
+        updateTextInput(session, paste0("eml_creator_city_", ids[i]), value = c$city %||% "")
+        updateTextInput(session, paste0("eml_creator_admin_area_", ids[i]), value = c$admin_area %||% "")
+        updateTextInput(session, paste0("eml_creator_country_", ids[i]), value = c$country %||% "")
+        updateTextInput(session, paste0("eml_creator_phone_", ids[i]), value = c$phone %||% "")
+      }
+    }
+
+    personnel <- parsed$personnel
+    if (!is.null(personnel) && length(personnel) > 0) {
+      ids <- set_personnel_rows(length(personnel))
+      for (i in seq_along(ids)) {
+        p <- personnel[[i]]
+        updateTextInput(session, paste0("eml_personnel_given_", ids[i]), value = p$given_name %||% "")
+        updateTextInput(session, paste0("eml_personnel_sur_", ids[i]), value = p$sur_name %||% "")
+        updateTextInput(session, paste0("eml_personnel_position_", ids[i]), value = p$position %||% "")
+        updateTextInput(session, paste0("eml_personnel_email_", ids[i]), value = p$email %||% "")
+        updateTextInput(session, paste0("eml_personnel_role_", ids[i]), value = p$role %||% "POINT_OF_CONTACT")
+      }
+    }
+
+    aps <- parsed$associated_parties
+    if (!is.null(aps)) {
+      ids <- set_ap_rows(length(aps))
+      for (i in seq_along(ids)) {
+        a <- aps[[i]]
+        updateTextInput(session, paste0("eml_ap_given_", ids[i]), value = a$given_name %||% "")
+        updateTextInput(session, paste0("eml_ap_sur_", ids[i]), value = a$sur_name %||% "")
+        updateTextInput(session, paste0("eml_ap_position_", ids[i]), value = a$position %||% "")
+        updateTextInput(session, paste0("eml_ap_email_", ids[i]), value = a$email %||% "")
+        updateSelectInput(session, paste0("eml_ap_role_", ids[i]), selected = a$role %||% "PUBLISHER")
+      }
+    }
+
     showNotification(paste0("Filled ", length(parsed), " field(s) from the uploaded file - review before continuing."),
                       type = "message", duration = 6)
   })
@@ -1088,31 +1354,55 @@ server <- function(input, output, session) {
       delivery_point = input$eml_org_address,
       city           = input$eml_org_city,
       admin_area     = input$eml_org_admin_area,
-      country        = input$eml_org_country
+      country        = input$eml_org_country,
+      phone          = input$eml_org_phone
     )
-    creator <- c(list(given_name = input$eml_creator_given, sur_name = input$eml_creator_sur,
-                       position = input$eml_creator_position, email = input$eml_creator_email), org)
+    creators <- lapply(rv$creator_ids, function(id) {
+      list(given_name     = input[[paste0("eml_creator_given_", id)]],
+           sur_name       = input[[paste0("eml_creator_sur_", id)]],
+           position       = input[[paste0("eml_creator_position_", id)]],
+           email          = input[[paste0("eml_creator_email_", id)]],
+           organization   = input[[paste0("eml_creator_org_", id)]],
+           delivery_point = input[[paste0("eml_creator_address_", id)]],
+           city           = input[[paste0("eml_creator_city_", id)]],
+           admin_area     = input[[paste0("eml_creator_admin_area_", id)]],
+           country        = input[[paste0("eml_creator_country_", id)]],
+           phone          = input[[paste0("eml_creator_phone_", id)]])
+    })
+    # "Same as creator" (metadata provider / contact) means the FIRST
+    # listed creator - EML only ever has one metadataProvider/contact,
+    # unlike creator which can repeat.
+    first_creator <- creators[[1]]
 
     metadata_provider <- if (isTRUE(input$eml_mp_same)) {
-      creator
+      first_creator
     } else {
       c(list(given_name = input$eml_mp_given, sur_name = input$eml_mp_sur,
              position = input$eml_mp_position, email = input$eml_mp_email), org)
     }
 
     contact <- if (isTRUE(input$eml_contact_same)) {
-      creator
+      first_creator
     } else {
       c(list(given_name = input$eml_contact_given, sur_name = input$eml_contact_sur,
              position = input$eml_contact_position, email = input$eml_contact_email), org)
     }
 
-    associated_party <- if (isTRUE(input$eml_ap_include)) {
-      c(list(given_name = input$eml_ap_given, sur_name = input$eml_ap_sur,
-             position = input$eml_ap_position, email = input$eml_ap_email, role = input$eml_ap_role), org)
-    } else {
-      NULL
-    }
+    associated_party <- lapply(rv$ap_ids, function(id) {
+      c(list(given_name = input[[paste0("eml_ap_given_", id)]],
+             sur_name    = input[[paste0("eml_ap_sur_", id)]],
+             position    = input[[paste0("eml_ap_position_", id)]],
+             email       = input[[paste0("eml_ap_email_", id)]],
+             role        = input[[paste0("eml_ap_role_", id)]]), org)
+    })
+
+    project_personnel <- lapply(rv$personnel_ids, function(id) {
+      c(list(given_name = input[[paste0("eml_personnel_given_", id)]],
+             sur_name    = input[[paste0("eml_personnel_sur_", id)]],
+             position    = input[[paste0("eml_personnel_position_", id)]],
+             email       = input[[paste0("eml_personnel_email_", id)]],
+             role        = input[[paste0("eml_personnel_role_", id)]]), org)
+    })
 
     keywords <- trimws(strsplit(input$eml_keywords %||% "", ",")[[1]])
     abstract_paragraphs <- strsplit(input$eml_abstract %||% "", "\n")[[1]]
@@ -1121,7 +1411,7 @@ server <- function(input, output, session) {
     eml <- tryCatch(
       build_eml_xml(
         title                     = input$eml_title,
-        creator                   = creator,
+        creator                   = creators,
         metadata_provider         = metadata_provider,
         contact                   = contact,
         associated_party          = associated_party,
@@ -1139,7 +1429,8 @@ server <- function(input, output, session) {
         project_abstract          = input$eml_project_abstract,
         funding                   = input$eml_funding,
         study_area_description    = input$eml_study_area_desc,
-        design_description        = input$eml_design_desc
+        design_description        = input$eml_design_desc,
+        project_personnel         = project_personnel
       ),
       error = function(e) {
         showNotification(paste("Could not generate metadata:", conditionMessage(e)), type = "error", duration = NULL)
@@ -1179,7 +1470,9 @@ server <- function(input, output, session) {
             if (!is.null(rv$eml_xml)) ", and eml.xml" else " (no eml.xml - go back to Step 6 to generate one)",
             " - ready to upload to an IPT."
           )),
-          downloadButton("download_archive", "Download archive (.zip)", class = "btn-primary")
+          downloadButton("download_archive", "Download archive (.zip)", class = "btn-primary"),
+          if (archive_history_enabled())
+            p(class = "muted", style = "margin-top: 8px;", "Every archive generated here is also saved to the History tab.")
         )
       ),
       div(class = "nav-row", actionButton("back_to_6_from_7", tagList(bsicons::bs_icon("arrow-left"), " Back"), class = "btn-outline-secondary"), div())
@@ -1266,6 +1559,78 @@ server <- function(input, output, session) {
       old_wd <- setwd(tmpdir)
       on.exit(setwd(old_wd))
       zip::zip(file, files = list.files(".", recursive = TRUE))
+      setwd(old_wd)
+
+      if (archive_history_enabled()) {
+        tryCatch({
+          save_archive_to_s3(file, input$project_id, names(rv$build_result$dna_extension))
+          history_refresh(isolate(history_refresh()) + 1)
+        }, error = function(e) {
+          showNotification(paste("Archive downloaded, but saving it to history failed:", conditionMessage(e)), type = "warning", duration = 8)
+        })
+      }
+    }
+  )
+
+  # ---- History tab (only functional when AWS credentials are set) --------
+  archive_history_df <- reactive({
+    history_refresh()
+    req(archive_history_enabled())
+    tryCatch(list_archive_history(), error = function(e) {
+      showNotification(paste("Couldn't load archive history:", conditionMessage(e)), type = "error")
+      NULL
+    })
+  })
+
+  output$history_tab_body <- renderUI({
+    if (!archive_history_enabled()) {
+      return(card(
+        card_header(bsicons::bs_icon("clock-history", class = "section-icon"), "History"),
+        card_body(p(class = "muted",
+          "Archive history isn't configured yet for this deployment (no AWS credentials set) - archives generated here aren't saved anywhere permanent."))
+      ))
+    }
+    tagList(
+      card(
+        card_header(bsicons::bs_icon("clock-history", class = "section-icon"), "Public S3 folder contents"),
+        card_body(
+          p(class = "muted", paste0(
+            "Everything currently under s3://", s3_bucket_name(), "/", s3_public_prefix(),
+            "/ - not just archives generated by this app. Select a row to download it."
+          )),
+          DT::DTOutput("archive_history_table"),
+          div(style = "margin-top: 10px;",
+              downloadButton("download_history_item", "Download selected", class = "btn-outline-primary btn-sm"))
+        )
+      )
+    )
+  })
+
+  output$archive_history_table <- DT::renderDT({
+    df <- archive_history_df()
+    req(df)
+    DT::datatable(
+      df[, c("last_modified", "path", "size_mb")],
+      selection = "single", rownames = FALSE,
+      colnames = c("Last modified (UTC)", "Path", "Size"),
+      options = list(pageLength = 15, dom = "tip")
+    )
+  })
+
+  output$download_history_item <- downloadHandler(
+    filename = function() {
+      sel <- input$archive_history_table_rows_selected
+      req(sel)
+      df <- archive_history_df()
+      req(df)
+      basename(df$s3_key[sel])
+    },
+    content = function(file) {
+      sel <- input$archive_history_table_rows_selected
+      req(sel)
+      df <- archive_history_df()
+      req(df)
+      fetch_archive_from_s3(df$s3_key[sel], file)
     }
   )
 

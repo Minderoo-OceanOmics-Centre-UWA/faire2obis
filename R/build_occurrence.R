@@ -15,29 +15,38 @@ resolve_scientific_name <- function(taxa) {
     domain  = "domain"
   )
 
+  # Vectorized equivalent of the original rowwise() version -
+  # rowwise() processes one row-group at a time and carries real
+  # per-row overhead (both speed and memory) on a table with one row
+  # per ASV, which can run into the thousands. case_when() picks the
+  # same "value for this row's taxonRank" without that overhead.
+  val_for_rank <- dplyr::case_when(
+    taxa$taxonRank == "species" ~ taxa$scientificName,
+    taxa$taxonRank == "genus"   ~ taxa$genus,
+    taxa$taxonRank == "family"  ~ taxa$family,
+    taxa$taxonRank == "order"   ~ taxa$order,
+    taxa$taxonRank == "class"   ~ taxa$class,
+    taxa$taxonRank == "phylum"  ~ taxa$phylum,
+    taxa$taxonRank == "domain"  ~ taxa$domain,
+    TRUE ~ NA_character_
+  )
+
   taxa %>%
-    dplyr::rowwise() %>%
     dplyr::mutate(
-      resolvedScientificName = if (taxonRank == "not applicable") {
+      resolvedScientificName = dplyr::case_when(
         # WoRMS AphiaID 12's actual scientificName is "Biota incertae
         # sedis" (verified directly against the live record) - not
         # "Incertae sedis" alone. OBIS's own DNA-derived-data guidance
         # (manual.obis.org/dna_data) requires this exact string for
         # wholly unknown sequences, paired with this LSID.
-        "Biota incertae sedis"
-      } else if (taxonRank %in% names(rank_col)) {
-        val <- get(rank_col[[taxonRank]])
-        if (is.na(val) || val %in% c("dropped", "not applicable")) NA_character_ else val
-      } else {
-        NA_character_
-      },
-      resolvedScientificNameID = if (taxonRank == "not applicable") {
-        "urn:lsid:marinespecies.org:taxname:12"
-      } else {
-        NA_character_
-      }
-    ) %>%
-    dplyr::ungroup()
+        taxonRank == "not applicable" ~ "Biota incertae sedis",
+        taxonRank %in% names(rank_col) & !val_for_rank %in% c("dropped", "not applicable") ~ val_for_rank,
+        TRUE ~ NA_character_
+      ),
+      resolvedScientificNameID = dplyr::if_else(
+        taxonRank == "not applicable", "urn:lsid:marinespecies.org:taxname:12", NA_character_
+      )
+    )
 }
 
 get_real_event_ids <- function(source_assay_path, sample_category_keep) {
@@ -79,9 +88,25 @@ build_occurrence <- function(input_files, real_event_ids, associated_sequences_u
       dplyr::summarise(dplyr::across(dplyr::everything(), ~ sum(.x, na.rm = TRUE))) %>%
       tidyr::pivot_longer(dplyr::everything(), names_to = "eventID", values_to = "sampleSizeValue")
 
-    otu_long <- otu %>%
-      tidyr::pivot_longer(-seq_id, names_to = "eventID", values_to = "organismQuantity") %>%
-      dplyr::filter(organismQuantity > 0)
+    # eDNA read-count tables are very sparse (mostly zeros) - pivoting
+    # to long format FIRST and filtering afterward (the original
+    # approach) briefly materializes one row per ASV x sample
+    # combination, including every zero, which can be 20-100x larger
+    # than the final non-zero result and was the dominant memory cost
+    # in this whole pipeline (traced to an out-of-memory crash on a
+    # 1GB-limited deployment). Extracting only the non-zero cells
+    # directly from the matrix, via which(..., arr.ind = TRUE), never
+    # creates that dense intermediate at all.
+    otu_mat <- as.matrix(otu[, setdiff(names(otu), "seq_id")])
+    storage.mode(otu_mat) <- "double"
+    otu_mat[is.na(otu_mat)] <- 0
+    nz <- which(otu_mat != 0, arr.ind = TRUE)
+    otu_long <- tibble::tibble(
+      seq_id           = otu$seq_id[nz[, "row"]],
+      eventID          = colnames(otu_mat)[nz[, "col"]],
+      organismQuantity = otu_mat[nz]
+    )
+    rm(otu_mat, nz)
 
     log_msg("  Non-zero ASV-by-sample detections: ", nrow(otu_long))
 

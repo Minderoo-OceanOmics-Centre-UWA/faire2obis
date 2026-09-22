@@ -92,6 +92,16 @@ app_css <- "
   body { background-color: #f9f9f7; }
   html, body { height: auto !important; overflow-y: auto !important; }
 
+  /* Subtle underwater scene behind the whole page (light rays, bubbles,
+     seaweed) - fixed to the viewport (not the scrollable page), so it
+     stays a constant, quiet backdrop rather than scrolling past. Very
+     low opacity by design - texture, not a picture to look at. */
+  .ocean-bg-layer {
+    position: fixed; inset: 0; z-index: -1; opacity: 0.16;
+    pointer-events: none; overflow: hidden;
+  }
+  .ocean-bg-layer svg { width: 100%; height: 100%; }
+
   /* Positioning context for the file-input scroll-jack fix in the
      <script> below (that fix has to happen in JS - Shiny's own
      fileInput ships an inline `!important` style that no CSS rule,
@@ -99,19 +109,21 @@ app_css <- "
   .btn-file { position: relative; overflow: hidden; }
 
   .app-header {
-    background: linear-gradient(135deg, #0b0b0b 0%, #16171a 100%);
-    color: #ffffff; padding: 18px 36px; display: flex; align-items: center; gap: 14px;
+    position: relative; overflow: hidden;
+    background: linear-gradient(160deg, #04182f 0%, #0a3d62 40%, #0f7a8c 75%, #14a3a3 100%);
+    color: #ffffff; padding: 22px 36px 46px 36px; display: flex; align-items: center; gap: 16px;
   }
-  .app-header .brand-mark {
-    width: 38px; height: 38px; border-radius: 9px; background: #2a78d6;
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    font-weight: 700; font-size: 1rem; color: #fff;
+  .header-bubble {
+    position: absolute; border-radius: 50%; background: rgba(255,255,255,0.08);
+    pointer-events: none;
   }
-  .app-header h1 { font-size: 1.32rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
-  .app-header p { color: #a9a89f; margin: 1px 0 0 0; font-size: 0.86rem; }
+  .header-wave { position: absolute; left: 0; right: 0; bottom: -2px; width: 100%; height: 46px; line-height: 0; }
+  .app-header .brand-mark { flex-shrink: 0; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.25)); }
+  .app-header h1 { font-size: 1.34rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+  .app-header p { color: #cfe9ec; margin: 1px 0 0 0; font-size: 0.86rem; }
   .app-header .header-spacer { flex: 1; }
-  .restart-btn { color: #c3c2b7 !important; border-color: #3a3a38 !important; }
-  .restart-btn:hover { color: #fff !important; border-color: #d03b3b !important; background: rgba(208,59,59,0.15) !important; }
+  .restart-btn { color: #cfe9ec !important; border-color: rgba(255,255,255,0.28) !important; }
+  .restart-btn:hover { color: #fff !important; border-color: #ffffff !important; background: rgba(255,255,255,0.12) !important; }
 
   .stepper-flex { display: flex; align-items: flex-start; padding: 26px 48px 22px 48px; background: #ffffff; border-bottom: 1px solid #eceae4; }
   .step-item { display: flex; flex-direction: column; align-items: center; }
@@ -127,8 +139,12 @@ app_css <- "
   .step-line { flex: 1; height: 2px; background: #eceae4; margin: 16px 6px 0 6px; }
   .step-line.done { background: #0ca30c; }
 
-  .content-wrap { max-width: 880px; margin: 0 auto; padding: 32px 24px 70px 24px; }
-  .card { box-shadow: 0 1px 2px rgba(11,11,11,0.03), 0 4px 10px rgba(11,11,11,0.03); margin-bottom: 18px; }
+  .content-wrap { max-width: 880px; margin: -18px auto 0 auto; padding: 32px 24px 70px 24px; position: relative; z-index: 1; }
+  .card {
+    box-shadow: 0 1px 2px rgba(11,11,11,0.03), 0 4px 10px rgba(11,11,11,0.03);
+    margin-bottom: 18px; transition: box-shadow .18s ease, transform .18s ease;
+  }
+  .card:hover { box-shadow: 0 2px 6px rgba(11,11,11,0.05), 0 10px 24px rgba(11,11,11,0.07); transform: translateY(-1px); }
   .card-header { background: #fff; font-weight: 600; font-size: 0.94rem; padding: 14px 20px; display:flex; align-items:center; gap:8px; }
   .card-body { padding: 20px; }
   .section-icon { color: #2a78d6; }
@@ -145,6 +161,19 @@ app_css <- "
   .btn-primary { font-weight: 600; }
   h4, h5 { font-weight: 700; letter-spacing: -0.01em; }
   .nav-row { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; }
+
+  .app-footer {
+    background: linear-gradient(160deg, #04182f 0%, #0a3d62 45%, #0f7a8c 100%);
+    color: #cfe9ec; padding: 28px 36px; margin-top: 48px;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    text-align: center; font-size: 0.82rem;
+  }
+  .app-footer a { color: #8fd6dc; text-decoration: none; }
+  .app-footer a:hover { color: #ffffff; text-decoration: underline; }
+  .app-footer .footer-credit { color: #ffffff; font-weight: 600; font-size: 0.86rem; }
+  .app-footer .footer-links { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  .app-footer .footer-sep { color: rgba(255,255,255,0.25); }
+  .app-footer .footer-copyright { color: #9fc9cd; font-size: 0.76rem; margin-top: 4px; }
 "
 
 # ---------------------------------------------------------------------
@@ -283,15 +312,128 @@ ui <- page_fluid(
     "))
   ),
 
+  div(class = "ocean-bg-layer", HTML('
+    <svg viewBox="0 0 1440 900" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <defs>
+        <linearGradient id="oceanBgGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#0d4d78"/>
+          <stop offset="45%" stop-color="#0a3d62"/>
+          <stop offset="100%" stop-color="#031225"/>
+        </linearGradient>
+        <radialGradient id="sunGlow" cx="50%" cy="0%" r="75%">
+          <stop offset="0%" stop-color="#eaffff" stop-opacity="0.55"/>
+          <stop offset="35%" stop-color="#bdeef2" stop-opacity="0.18"/>
+          <stop offset="100%" stop-color="#bdeef2" stop-opacity="0"/>
+        </radialGradient>
+        <linearGradient id="rayGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#ffffff" stop-opacity="0.5"/>
+          <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+        </linearGradient>
+        <linearGradient id="sandGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#1a6a7a" stop-opacity="0"/>
+          <stop offset="100%" stop-color="#123a4a" stop-opacity="0.9"/>
+        </linearGradient>
+        <linearGradient id="weedGrad" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0%" stop-color="#0d5f6e"/>
+          <stop offset="100%" stop-color="#1fc9c9"/>
+        </linearGradient>
+        <filter id="softBlur"><feGaussianBlur stdDeviation="14"/></filter>
+      </defs>
+
+      <rect width="1440" height="900" fill="url(#oceanBgGrad)"/>
+      <ellipse cx="720" cy="-80" rx="900" ry="420" fill="url(#sunGlow)"/>
+
+      <!-- God-rays filtering down from the surface, softened -->
+      <g filter="url(#softBlur)">
+        <polygon points="120,-20 300,-20 20,900 -160,900" fill="url(#rayGrad)"/>
+        <polygon points="480,-20 610,-20 340,900 160,900" fill="url(#rayGrad)"/>
+        <polygon points="860,-20 1040,-20 1220,900 980,900" fill="url(#rayGrad)"/>
+        <polygon points="1180,-20 1310,-20 1440,780 1220,900" fill="url(#rayGrad)"/>
+      </g>
+
+      <!-- Bubbles, varied sizes with a small offset highlight for depth -->
+      <g fill="#ffffff">
+        <circle cx="120" cy="140" r="7" opacity="0.5"/><circle cx="117" cy="137" r="2" opacity="0.7"/>
+        <circle cx="150" cy="210" r="4" opacity="0.4"/>
+        <circle cx="365" cy="95" r="11" opacity="0.45"/><circle cx="361" cy="91" r="3" opacity="0.7"/>
+        <circle cx="700" cy="265" r="6" opacity="0.4"/>
+        <circle cx="985" cy="125" r="9" opacity="0.5"/><circle cx="982" cy="122" r="2.5" opacity="0.7"/>
+        <circle cx="1035" cy="195" r="5" opacity="0.35"/>
+        <circle cx="1305" cy="305" r="8" opacity="0.45"/><circle cx="1301" cy="301" r="2" opacity="0.7"/>
+        <circle cx="1365" cy="155" r="5" opacity="0.4"/>
+        <circle cx="245" cy="490" r="6" opacity="0.3"/>
+        <circle cx="865" cy="570" r="7" opacity="0.3"/>
+        <circle cx="55" cy="620" r="5" opacity="0.35"/>
+        <circle cx="1400" cy="640" r="6" opacity="0.3"/>
+        <circle cx="600" cy="700" r="4" opacity="0.25"/>
+      </g>
+
+      <!-- Fish, a few sizes/depths for a sense of life -->
+      <g opacity="0.55" fill="#8fd6dc">
+        <path d="M300,340 Q332,320 368,334 Q354,340 354,347 Q354,354 368,360 Q332,374 300,352 Z"/>
+      </g>
+      <g opacity="0.4" fill="#6fc3cf">
+        <path d="M1120,420 Q1090,403 1055,416 Q1068,420 1068,427 Q1068,434 1055,439 Q1090,451 1120,433 Z"/>
+      </g>
+      <g opacity="0.35" fill="#8fd6dc">
+        <path d="M560,640 Q582,626 608,637 Q598,640 598,645 Q598,650 608,654 Q582,664 560,648 Z"/>
+      </g>
+      <g opacity="0.3" fill="#6fc3cf">
+        <path d="M1220,180 Q1240,168 1262,177 Q1254,180 1254,184 Q1254,188 1262,192 Q1240,200 1220,186 Z"/>
+      </g>
+
+      <!-- Sandy seafloor with rising seaweed and rounded coral/rock forms -->
+      <path d="M0,900 L0,780 Q180,740 400,770 Q680,808 960,772 Q1220,740 1440,782 L1440,900 Z" fill="url(#sandGrad)"/>
+      <ellipse cx="230" cy="860" rx="70" ry="22" fill="#123a4a" opacity="0.55"/>
+      <ellipse cx="1180" cy="870" rx="90" ry="24" fill="#123a4a" opacity="0.55"/>
+
+      <path d="M90,900 C76,818 118,776 100,694 C84,622 126,580 106,506" stroke="url(#weedGrad)" stroke-width="10" fill="none" opacity="0.55" stroke-linecap="round"/>
+      <path d="M150,900 C166,828 130,786 148,714 C164,652 128,610 146,548" stroke="url(#weedGrad)" stroke-width="7" fill="none" opacity="0.45" stroke-linecap="round"/>
+      <path d="M1290,900 C1276,806 1322,764 1302,682 C1286,618 1326,576 1306,514" stroke="url(#weedGrad)" stroke-width="10" fill="none" opacity="0.55" stroke-linecap="round"/>
+      <path d="M1360,900 C1378,836 1342,794 1362,732 C1378,682 1348,646 1364,600" stroke="url(#weedGrad)" stroke-width="6" fill="none" opacity="0.4" stroke-linecap="round"/>
+    </svg>
+  ')),
+
   div(class = "app-header",
-      div(class = "brand-mark", "F2O"),
+      # Decorative bubbles - purely atmospheric, kept subtle (low opacity)
+      # so they read as texture rather than clutter.
+      div(class = "header-bubble", style = "width:70px; height:70px; top:-20px; right:12%;"),
+      div(class = "header-bubble", style = "width:26px; height:26px; top:20px; right:28%;"),
+      div(class = "header-bubble", style = "width:14px; height:14px; top:52px; right:8%;"),
+      div(class = "header-bubble", style = "width:40px; height:40px; bottom:-10px; left:38%;"),
+
+      div(class = "brand-mark", HTML('
+        <svg width="44" height="44" viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="FAIRe2OBIS logo">
+          <defs>
+            <linearGradient id="f2oLogoGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#2a78d6"/>
+              <stop offset="100%" stop-color="#14a3a3"/>
+            </linearGradient>
+          </defs>
+          <rect width="44" height="44" rx="12" fill="url(#f2oLogoGrad)"/>
+          <path d="M9 13 Q17 5 25 13" stroke="#ffffff" stroke-width="1.6" fill="none" opacity="0.85" stroke-linecap="round"/>
+          <circle cx="9" cy="13" r="2" fill="#ffffff"/>
+          <circle cx="17" cy="8.3" r="2" fill="#ffffff"/>
+          <circle cx="25" cy="13" r="2" fill="#ffffff"/>
+          <path d="M6 25 Q12 19, 18 25 T30 25 T42 25" stroke="#ffffff" stroke-width="2.2" fill="none" stroke-linecap="round" opacity="0.92"/>
+          <path d="M4 32 Q10 26, 16 32 T28 32 T40 32" stroke="#ffffff" stroke-width="1.8" fill="none" stroke-linecap="round" opacity="0.55"/>
+        </svg>
+      ')),
       div(
         h1("FAIRe2OBIS"),
         p("Convert FAIRe eDNA metabarcoding data into an OBIS-ready Darwin Core Archive")
       ),
       div(class = "header-spacer"),
       actionButton("restart_app", tagList(bsicons::bs_icon("arrow-counterclockwise"), " Restart"),
-                   class = "btn btn-outline-light btn-sm restart-btn")
+                   class = "btn btn-outline-light btn-sm restart-btn"),
+
+      # Wave divider - blends the ocean-gradient header into the page's
+      # light background below, a common "ocean site" section transition.
+      div(class = "header-wave", HTML('
+        <svg viewBox="0 0 1440 60" preserveAspectRatio="none" style="width:100%; height:100%; display:block;">
+          <path d="M0,30 C240,60 480,0 720,18 C960,36 1200,8 1440,26 L1440,60 L0,60 Z" fill="#f9f9f7"></path>
+        </svg>
+      '))
   ),
 
   # Top-level tab bar: "Generate" (the step wizard) and "History" (past
@@ -350,6 +492,19 @@ ui <- page_fluid(
       "History",
       div(class = "content-wrap", uiOutput("history_tab_body"))
     )
+  ),
+
+  div(class = "app-footer",
+      div(class = "footer-credit", "Designed and developed by the Minderoo OceanOmics Centre at UWA team"),
+      div(class = "footer-links",
+          tags$a(href = "https://www.uwa.edu.au/oceans-institute/partnerships/minderoo-oceanomics-centre-at-uwa",
+                 target = "_blank", rel = "noopener noreferrer", "Minderoo OceanOmics Centre at UWA"),
+          span(class = "footer-sep", "|"),
+          tags$a(href = "https://github.com/Minderoo-OceanOmics-Centre-UWA/faire2obis",
+                 target = "_blank", rel = "noopener noreferrer", "FAIRe2OBIS on GitHub")
+      ),
+      div(class = "footer-copyright",
+          paste0("© ", format(Sys.Date(), "%Y"), " Minderoo OceanOmics Centre at UWA. All rights reserved."))
   )
 )
 

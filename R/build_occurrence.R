@@ -114,8 +114,22 @@ build_occurrence <- function(input_files, real_event_ids, associated_sequences_u
       dplyr::left_join(taxa, by = "seq_id") %>%
       dplyr::left_join(sample_totals, by = "eventID") %>%
       dplyr::transmute(
-        occurrenceID = paste(eventID, seq_id, sep = "_"),
+        # eventID + seq_id alone is NOT globally unique: seq_id (the
+        # ASV id, e.g. "ASV_2774") is numbered independently within
+        # EACH assay's own pipeline run, not across assays - so two
+        # different assays commonly reuse the same ASV number for
+        # entirely different sequences, producing identical
+        # occurrenceIDs once eventID (shared across assays, same
+        # physical sample) is combined with just seq_id. Confirmed as
+        # a real collision in production data (OBIS flagged duplicate
+        # occurrenceIDs across Occurrence_16SFishD.csv and
+        # Occurrence_MiFishUE2.csv for the same eventID+ASV number).
+        # Including the assay name makes it unique across the whole
+        # archive, not just within one assay's own file.
+        occurrenceID = paste(eventID, assay, seq_id, sep = "_"),
         eventID,
+        # seq_id (ASV id) is not a DwC term, so the IPT lists it as unmapped - expected and harmless (Sachit confirmed). Kept because build_dna_extension() needs it.
+        seq_id,
         basisOfRecord = "MaterialSample",
         occurrenceStatus = "present",
         scientificName = resolvedScientificName,

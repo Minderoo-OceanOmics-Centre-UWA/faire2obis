@@ -26,12 +26,18 @@
 #   samp_name          -> (source for) eventID
 #   eventDate          -> eventDate            (already DwC-named in FAIRe)
 #   decimalLatitude/Longitude -> decimalLatitude/decimalLongitude (already DwC-named)
-#   env_broad_scale / env_local_scale / env_medium -> kept as-is (ENVO terms)
+#   env_broad_scale / env_local_scale / env_medium -> NOT in the Event core;
+#                       published in the DNA Derived Data extension instead
+#   verbatimEventDate + verbatimEventTime -> merged into verbatimEventDate
+#   habitat_natural_artificial_0_1 -> habitat ("natural" for 0, "artificial" for 1)
 #   minimumDepthInMeters / maximumDepthInMeters -> kept as-is
 #   samp_collect_method / samp_collect_device -> samplingProtocol
 #   samp_size / samp_size_unit -> sampleSizeValue / sampleSizeUnit
 #   site_id -> locationID
-#   geo_loc_name -> kept as-is (MIxS term, populated locality string)
+#   geo_loc_name -> locality
+#   waterTemperature/salinity/ph/dissolvedOxygen/turbidity/tidal_stage/
+#     water_current/samp_weather -> dropped when entirely empty; a warning is
+#     logged if populated (they'd need an eMoF extension)
 #   verbatimLatitude/Longitude, verbatimCoordinateSystem, verbatimSRS -> kept as verbatim* fields
 #
 # Audited every other sampleMetadata column (146 total) against actual

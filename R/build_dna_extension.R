@@ -34,17 +34,13 @@ get_project_term <- function(project_meta, term, assay_cols) {
 #'   build_occurrence(), AFTER WoRMS matching if you want the final scientificName -
 #'   this extension doesn't use scientificName, only occurrenceID/eventID, so order
 #'   relative to match_worms() doesn't matter for this function specifically)
-#' @param event_core The built Event core tibble (from build_event_core())
 #' @param assay_project_column Named list: assay -> projectMetadata assay column(s)
 #'   (e.g. list(MiFishUE2 = c("assay1", "assay3")) for a combined assay)
-#' @param associated_sequences_uri Constant value for associatedSequences
 #' @return list(dna_extension = named list of per-assay tibbles, messages = character())
-build_dna_extension <- function(input_files, occurrence_tables, event_core,
-                                 assay_project_column, associated_sequences_uri) {
+build_dna_extension <- function(input_files, occurrence_tables, assay_project_column) {
   messages <- character()
   log_msg <- function(...) messages <<- c(messages, paste0(...))
 
-  event_slim <- event_core %>% dplyr::select(eventID, env_broad_scale, env_local_scale, env_medium)
   dna_tables <- list()
 
   for (assay in names(input_files)) {
@@ -82,27 +78,27 @@ build_dna_extension <- function(input_files, occurrence_tables, event_core,
 
     taxa <- read_faire_sheet(path, "taxaFinal") %>% dplyr::select(seq_id, dna_sequence)
 
-    exp_run <- read_faire_sheet(path, "experimentRunMetadata") %>%
+    # env_* fields live here (not in the Event core) - sampleMetadata is
+    # verified identical across assays by build_event_core().
+    event_slim <- read_faire_sheet(path, "sampleMetadata") %>%
       dplyr::rename(eventID = samp_name) %>%
-      dplyr::select(eventID, input_read_count, output_read_count)
-    stopifnot(
-      "experimentRunMetadata has more than one row for some sample(s) - joining as-is would duplicate DNA extension rows for those samples" =
-        !any(duplicated(exp_run$eventID))
-    )
+      dplyr::select(eventID, env_broad_scale, env_local_scale, env_medium)
 
     occ <- occurrence_tables[[assay]]
     if (is.null(occ)) stop("No Occurrence table found for assay '", assay, "' - run build_occurrence() first.")
 
+    # seq_id now comes straight from build_occurrence()'s own output
+    # column (added alongside the eventID+assay+seq_id occurrenceID
+    # fix), not re-derived from occurrenceID by substring position -
+    # that reconstruction was fragile even before the collision bug
+    # (assumed a fixed "eventID_seqid" shape) and would have broken
+    # outright once occurrenceID's format changed to include the
+    # assay name.
     detections <- occ %>%
-      dplyr::transmute(
-        occurrenceID,
-        eventID,
-        seq_id = substr(occurrenceID, nchar(eventID) + 2, nchar(occurrenceID))
-      )
+      dplyr::transmute(occurrenceID, eventID, seq_id)
 
     dna_ext <- detections %>%
       dplyr::left_join(taxa, by = "seq_id") %>%
-      dplyr::left_join(exp_run, by = "eventID") %>%
       dplyr::left_join(event_slim, by = "eventID") %>%
       dplyr::transmute(
         # eventID is the archive's structural join key - a DwC-A
@@ -133,28 +129,16 @@ build_dna_extension <- function(input_files, occurrence_tables, event_core,
         amplificationReactionVolumeUnit = "microliter",
         lib_layout                      = assay_meta$lib_layout,
         seq_meth                        = seq_meth,
-        # otu_class_appr is the actual DwC DNA Derived Data extension
-        # term ("Approach/algorithm and clustering level ... when
-        # defining OTUs or ASVs", e.g. MDT's own example
-        # "dada2; 1.14.0; ASV") - found this project was outputting
-        # only otu_clust_tool/otu_clust_cutoff (this pipeline's
-        # source-side FAIRe field names) under their own names instead
-        # of mapping them to the standard term, the same way sop is
-        # correctly renamed from sop_bioinformatics below. Kept the
-        # granular source fields too, for anyone reading the CSV
-        # directly - IPT will just map otu_class_appr automatically.
-        otu_class_appr                  = paste(
+        # otu_class_appr is the DwC DNA Derived Data term; it replaces the
+        # FAIRe otu_clust_tool/otu_clust_cutoff fields, which have no DwC
+        # term of their own and are combined into it here.
+        otu_class_appr                 = paste(
           na.omit(c(assay_meta$otu_clust_tool, assay_meta$otu_clust_cutoff)),
           collapse = "; "
         ),
-        otu_clust_tool                  = assay_meta$otu_clust_tool,
-        otu_clust_cutoff                = assay_meta$otu_clust_cutoff,
         otu_db                          = assay_meta$otu_db,
         otu_seq_comp_appr               = assay_meta$otu_seq_comp_appr,
-        sop                             = assay_meta$sop_bioinformatics,
-        associatedSequences             = associated_sequences_uri,
-        input_read_count,
-        output_read_count
+        sop                             = assay_meta$sop_bioinformatics
       )
 
     n_missing_seq <- sum(is.na(dna_ext$DNA_sequence))

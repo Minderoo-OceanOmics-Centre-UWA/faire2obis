@@ -107,6 +107,21 @@ run_qc_checks <- function(event, occurrence_tables, dna_tables) {
   }
   results$occ_dna_crosscheck <- occ_dna_crosscheck
 
+  # 7b. occurrenceID must be unique across the WHOLE archive, not just
+  # within one assay's own file - added after a real production bug
+  # where two different assays' Occurrence tables both happened to
+  # contain occurrenceID "eventID_ASV_2774" (ASV numbers are local to
+  # each assay's own pipeline run, not global), which every check
+  # above missed since none of them looked ACROSS assays. See
+  # CLAUDE.md's Identifiers section.
+  all_occurrence_ids <- unlist(lapply(occurrence_tables, function(df) df$occurrenceID), use.names = FALSE)
+  dup_occurrence_ids <- unique(all_occurrence_ids[duplicated(all_occurrence_ids)])
+  results$duplicate_occurrence_ids <- dup_occurrence_ids
+  if (length(dup_occurrence_ids) > 0) {
+    any_failures <- TRUE
+    log_msg("ERROR: ", length(dup_occurrence_ids), " occurrenceID(s) duplicated across assays - not unique archive-wide.")
+  }
+
   # 7. scientificNameID completeness (post-WoRMS-matching check).
   scientificname_coverage <- list()
   for (n in names(occurrence_tables)) {

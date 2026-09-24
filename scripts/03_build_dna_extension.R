@@ -16,17 +16,15 @@
 # Sources (see build_dna_extension() for the actual code):
 #   - taxaFinal$dna_sequence        -> DNA_sequence (the single most
 #                                       important field in this extension)
-#   - experimentRunMetadata         -> per-sample read counts
 #   - projectMetadata (long format: term_name x assay1..assay4)
 #                                    -> per-assay PCR/primer/bioinformatics
 #                                       metadata, constant across all rows
 #                                       of that assay
-#   - Event core -> env_broad_scale / env_local_scale / env_medium,
+#   - sampleMetadata -> env_broad_scale / env_local_scale / env_medium,
 #                   joined back in via eventID
-#   - config.R's ASSOCIATED_SEQUENCES_URI -> associatedSequences (ENA
-#     project accession PRJEB107937, confirmed public 2026-09-18) -
-#     experimentRunMetadata's own associatedSequences column is empty
-#     for every row in this project (0/580 populated).
+#   associatedSequences and the read count (sampleSizeValue) are NOT in this
+#   extension - neither is a DNA Derived Data term. They live in the
+#   Occurrence extension, where they are proper Darwin Core terms.
 #
 # NOTE: see config.R's ASSAY_PROJECT_COLUMN for the MiFishUE2
 # multi-assay-column mapping (confirmed project-specific decision -
@@ -45,8 +43,6 @@ library(readr)
 source("R/faire_io.R")
 source("R/build_dna_extension.R")
 
-event_core <- read_csv(EVENT_CORE_OUTPUT, show_col_types = FALSE)
-
 occurrence_files <- list.files(OCCURRENCE_OUTPUT_DIR, pattern = "^Occurrence_.*\\.csv$", full.names = TRUE)
 if (length(occurrence_files) == 0) {
   stop("No Occurrence_*.csv files found in ", OCCURRENCE_OUTPUT_DIR, " - run 02_build_occurrence.R first.")
@@ -57,9 +53,7 @@ names(occurrence_tables) <- sub("^Occurrence_(.*)\\.csv$", "\\1", basename(occur
 result <- build_dna_extension(
   input_files              = INPUT_FILES,
   occurrence_tables        = occurrence_tables,
-  event_core               = event_core,
-  assay_project_column     = ASSAY_PROJECT_COLUMN,
-  associated_sequences_uri = ASSOCIATED_SEQUENCES_URI
+  assay_project_column     = ASSAY_PROJECT_COLUMN
 )
 
 cat(paste(result$messages, collapse = "\n"), "\n")

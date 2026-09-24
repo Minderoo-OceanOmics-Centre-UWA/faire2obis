@@ -86,21 +86,27 @@ build_event_core <- function(input_files,
       eventID,
       parentEventID = NA_character_,
       eventDate,
-      verbatimEventDate,
-      verbatimEventTime,
-      decimalLatitude  = as.numeric(decimalLatitude),
+      # verbatimEventTime isn't a Darwin Core term, so it's merged into
+      # verbatimEventDate. The FAIRe date can arrive as an Excel serial
+      # number (e.g. "45450"), which is unreadable - convert it first.
+      verbatimEventDate = trimws(paste(
+        dplyr::if_else(
+          grepl("^[0-9]+(\\.[0-9]+)?$", verbatimEventDate),
+          format(as.Date(suppressWarnings(as.numeric(verbatimEventDate)), origin = "1899-12-30"), "%Y-%m-%d"),
+          as.character(verbatimEventDate)
+        ),
+        dplyr::coalesce(as.character(verbatimEventTime), "")
+      )),
+      decimalLatitude = as.numeric(decimalLatitude),
       decimalLongitude = as.numeric(decimalLongitude),
       verbatimLatitude,
       verbatimLongitude,
       verbatimCoordinateSystem,
       verbatimSRS,
       locationID = site_id,
-      geo_loc_name,
+      locality = geo_loc_name,
       minimumDepthInMeters = as.numeric(minimumDepthInMeters),
       maximumDepthInMeters = as.numeric(maximumDepthInMeters),
-      env_broad_scale,
-      env_local_scale,
-      env_medium,
       # samp_collect_method is unpopulated in some projects (e.g. OcOm_2408) -
       # the actual collection info lives in samp_collect_device instead.
       # Use whichever is populated rather than only samp_collect_method,
@@ -118,7 +124,11 @@ build_event_core <- function(input_files,
       # numeric in the Occurrence extension) and crashed script 05/Step 5.
       sampleSizeValue  = as.numeric(samp_size),
       sampleSizeUnit   = samp_size_unit,
-      habitat_natural_artificial_0_1,
+      habitat = dplyr::case_when(
+        as.character(habitat_natural_artificial_0_1) == "0" ~ "natural",
+        as.character(habitat_natural_artificial_0_1) == "1" ~ "artificial",
+        TRUE ~ as.character(habitat_natural_artificial_0_1)
+      ),
       waterTemperature = as.numeric(temp),
       salinity         = as.numeric(salinity),
       ph               = as.numeric(ph),
@@ -131,6 +141,23 @@ build_event_core <- function(input_files,
       georeferenceSources = georeference_sources,
       eventRemarks = site_comments
     )
+
+  # These measurement fields have no Event-core Darwin Core term - they
+  # belong in an eMoF extension. Drop the ones that are entirely empty
+  # (nothing to publish); warn if any are populated so they aren't lost.
+  measurement_cols <- c("waterTemperature", "salinity", "ph", "dissolvedOxygen",
+                        "dissolvedOxygenUnit", "turbidity", "tidal_stage",
+                        "water_current", "samp_weather")
+  empty_cols <- measurement_cols[vapply(measurement_cols, function(col) all(is.na(event_core[[col]])), logical(1))]
+  populated_cols <- setdiff(measurement_cols, empty_cols)
+  event_core <- event_core %>% dplyr::select(-dplyr::all_of(empty_cols))
+  if (length(empty_cols) > 0) {
+    log_msg("Dropped empty measurement columns from Event core: ", paste(empty_cols, collapse = ", "))
+  }
+  if (length(populated_cols) > 0) {
+    log_msg("WARNING: these measurement columns contain data but have no Event-core Darwin Core term - ",
+            "they need an eMoF extension: ", paste(populated_cols, collapse = ", "))
+  }
 
   log_msg("Event core built: ", nrow(event_core), " rows, ", ncol(event_core), " columns")
 

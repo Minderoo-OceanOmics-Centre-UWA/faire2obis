@@ -1,117 +1,197 @@
 ### R/archive_history.R
 #
-# Persists generated archive .zips to S3 so anyone using the hosted app
-# can re-download a past run later WITHOUT re-running the pipeline.
-# Needed because shinyapps.io/Posit Connect don't guarantee a running
-# app's local disk survives an idle restart, a redeploy, or scaling to
-# a second instance - so nothing written only to local disk can be
-# relied on to still be there next time someone opens the app.
+# Persists generated archive .zips to S3 in two places, so anyone using the
+# hosted app can come back to a past run WITHOUT re-running the pipeline
+# (shinyapps.io/Posit Connect don't guarantee a running app's local disk
+# survives an idle restart, a redeploy, or scaling to a second instance):
+#
+#   DRAFT   s3://<bucket>/biodiversity-public/Draft/<project>_<YYYYmmdd_HHMMSS>.zip
+#           A work-in-progress archive. Every save gets its own timestamped
+#           file, so drafts never overwrite each other.
+#   PUBLISH s3://<bucket>/biodiversity-public/Publish/<project>_CoreVersion.zip
+#           The archive that is ready to be sent to OBIS. One canonical file
+#           per project - publishing again REPLACES it (the app asks first).
+#   REPORT  s3://<bucket>/biodiversity-public/Report/<same base name as the zip>.png
+#           The one-page analysis report. Always named after its zip, so it is
+#           renamed along with it when a draft is moved to Publish.
+#
+# A draft is promoted with move_draft_to_publish() (copy to Publish, then
+# remove from Draft). The Draft and Publish tabs are LIVE listings of those
+# two folders - no separate bookkeeping index that could drift out of sync.
 #
 # Credentials and bucket name come from environment variables only,
-# never hardcoded (set these as "Environment Variables" in the
-# shinyapps.io dashboard for this app, not committed to the repo):
+# never hardcoded:
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
-#   FAIRE2OBIS_S3_BUCKET - the bucket name to store archives in
+#   FAIRE2OBIS_S3_BUCKET  - bucket (defaults to the project's bucket)
+#   FAIRE2OBIS_S3_PREFIX  - parent folder holding Draft/ and Publish/
+#                           (default "biodiversity-public")
 #
-# Each project gets ONE canonical archive, at
-#   s3://minderoo-oceanomics/biodiversity-public/<project_id>/<project_id>_CoreVersion.zip
-# matching this project's existing public S3 folder convention (one
-# folder per project id, e.g. .../biodiversity-public/OcOm_2408/...).
-# Generating a project's archive again OVERWRITES that same file.
-#
-# The "History" tab is a LIVE listing of everything actually under the
-# biodiversity-public/ prefix in the bucket - not just what this app
-# generated (that folder also holds files other tools/people put there,
-# e.g. a project's DwC-Archive subfolder from a different pipeline).
-# There is deliberately no separate bookkeeping index file for this any
-# more (an earlier version kept one, at .../ocom-edna/index.json) - a
-# live aws.s3::get_bucket_df() call is simpler, can never drift out of
-# sync with reality, and needs no read-modify-write race handling.
+# NOTE: Draft/ sits under biodiversity-public/, so whether drafts are
+# publicly readable depends on the bucket policy for that prefix.
 
-# Defaults to the project's known bucket/prefix; still overridable via
-# env var (e.g. to point a dev deployment at a separate bucket/prefix).
 s3_bucket_name <- function() {
   v <- Sys.getenv("FAIRE2OBIS_S3_BUCKET")
   if (nzchar(v)) v else "minderoo-oceanomics"
 }
-# Where PUBLIC project zips live - one subfolder per project id, matching
-# the existing convention (.../biodiversity-public/OcOm_2408/...). Also
-# the prefix the History tab lists everything under.
 s3_public_prefix <- function() {
   v <- Sys.getenv("FAIRE2OBIS_S3_PREFIX")
   if (nzchar(v)) v else "biodiversity-public"
+}
+s3_draft_prefix   <- function() paste0(s3_public_prefix(), "/Draft")
+s3_publish_prefix <- function() paste0(s3_public_prefix(), "/Publish")
+s3_report_prefix  <- function() paste0(s3_public_prefix(), "/Report")
+
+# A report always has the SAME base name as its zip, in the Report folder:
+#   Draft/OcOm_2408_20260925_142530.zip   <->  Report/OcOm_2408_20260925_142530.png
+#   Publish/OcOm_2408_CoreVersion.zip     <->  Report/OcOm_2408_CoreVersion.png
+report_key_for_zip <- function(zip_key) {
+  paste0(s3_report_prefix(), "/", sub("\\.zip$", "", basename(zip_key)), ".png")
 }
 
 safe_project_id <- function(project_id) {
   gsub("[^A-Za-z0-9_-]", "_", if (!is.null(project_id) && nzchar(project_id)) project_id else "untitled")
 }
-project_zip_key <- function(project_id) {
-  safe <- safe_project_id(project_id)
-  paste0(s3_public_prefix(), "/", safe, "/", safe, "_CoreVersion.zip")
+publish_zip_key <- function(project_id) {
+  paste0(s3_publish_prefix(), "/", safe_project_id(project_id), "_CoreVersion.zip")
+}
+draft_zip_key <- function(project_id, when = Sys.time()) {
+  paste0(s3_draft_prefix(), "/", safe_project_id(project_id), "_", format(when, "%Y%m%d_%H%M%S", tz = "UTC"), ".zip")
 }
 
-#' TRUE if archive history is configured (bucket known AND AWS credentials
-#' present). The app hides the whole History UI section, rather than
-#' erroring, when this is FALSE - e.g. when running locally during
-#' development, where the bucket name defaults but no AWS keys are set.
+# "OcOm_2408_20260925_142530.zip" -> "OcOm_2408"; "OcOm_2408_CoreVersion.zip" -> "OcOm_2408"
+project_from_filename <- function(file_name) {
+  sub("(_[0-9]{8}_[0-9]{6}|_CoreVersion)?\\.zip$", "", file_name)
+}
+
+#' TRUE if saving to Draft/Publish is configured (bucket known AND AWS
+#' credentials present). The app hides the save options, rather than
+#' erroring, when this is FALSE.
 archive_history_enabled <- function() {
   nzchar(s3_bucket_name()) &&
     nzchar(Sys.getenv("AWS_ACCESS_KEY_ID")) &&
     nzchar(Sys.getenv("AWS_SECRET_ACCESS_KEY"))
 }
 
-#' Save a generated archive zip to S3, OVERWRITING that project's
-#' existing zip (if any). No separate bookkeeping write - the History
-#' tab reads the bucket directly, so uploading the file IS the update.
-#'
-#' @param zip_path Local path to the already-built .zip file
-#' @param project_id Character - determines the S3 folder/filename, so
-#'   regenerating the SAME project's archive replaces its previous version
-#' @param assay_names Unused (kept for call-site compatibility)
-save_archive_to_s3 <- function(zip_path, project_id, assay_names = NULL) {
-  bucket <- s3_bucket_name()
-  if (!nzchar(bucket)) stop("FAIRE2OBIS_S3_BUCKET is not set - archive history is not configured.")
-
-  key <- project_zip_key(project_id)
-  ok <- aws.s3::put_object(file = zip_path, object = key, bucket = bucket)
+# ---- thin S3 wrappers (the only place aws.s3 is called; easy to swap out in tests)
+.s3_put <- function(file, key) {
+  ok <- aws.s3::put_object(file = file, object = key, bucket = s3_bucket_name())
   if (!isTRUE(ok)) stop("Upload to S3 did not report success.")
-
-  invisible(list(project_id = project_id, s3_key = key))
+  invisible(TRUE)
+}
+.s3_exists <- function(key) {
+  isTRUE(aws.s3::object_exists(object = key, bucket = s3_bucket_name()))
+}
+.s3_copy <- function(from_key, to_key) {
+  b <- s3_bucket_name()
+  aws.s3::copy_object(from_object = from_key, to_object = to_key, from_bucket = b, to_bucket = b)
+  invisible(TRUE)
+}
+.s3_delete <- function(key) {
+  isTRUE(aws.s3::delete_object(object = key, bucket = s3_bucket_name()))
+}
+.s3_list <- function(prefix) {
+  aws.s3::get_bucket_df(bucket = s3_bucket_name(), prefix = prefix, max = Inf)
+}
+.s3_get <- function(key, dest) {
+  aws.s3::save_object(object = key, bucket = s3_bucket_name(), file = dest)
+  invisible(dest)
 }
 
-#' List everything under the public prefix in the bucket, newest first,
-#' as a data.frame for a table - a live folder listing, not just what
-#' this app generated. Folder placeholder entries (zero-byte keys ending
-#' in "/", which S3 consoles create when you make an empty folder) are
-#' dropped since they're not real files.
-#'
-#' @return data.frame with columns last_modified, path (key with the
-#'   public prefix stripped, for display), size_mb (display string),
-#'   s3_key (full key, not for display - used for download); project
-#'   (the top-level folder the file lives under, i.e. the project id -
-#'   the first path segment, e.g. "OcOm_2408" for
-#'   "OcOm_2408/OcOm2408_CoreVersion.zip")
-list_archive_history <- function() {
-  bucket <- s3_bucket_name()
+# Uploads the report next to its zip's name. A report problem never fails the
+# archive save - the zip is what matters - so it returns NULL instead of stopping.
+.put_report_for <- function(report_path, zip_key) {
+  if (is.null(report_path) || !file.exists(report_path)) return(NULL)
+  key <- report_key_for_zip(zip_key)
+  ok <- tryCatch({ .s3_put(report_path, key); TRUE }, error = function(e) FALSE)
+  if (ok) key else NULL
+}
+
+#' Save a generated archive as a DRAFT - a new timestamped file every time.
+#' @param report_path Optional local PNG report, saved to Report/ under the same name
+#' @return list(project_id, s3_key, file_name, report_key = NULL if no report was saved)
+save_archive_as_draft <- function(zip_path, project_id, report_path = NULL) {
+  key <- draft_zip_key(project_id)
+  .s3_put(zip_path, key)
+  list(project_id = safe_project_id(project_id), s3_key = key, file_name = basename(key),
+       report_key = .put_report_for(report_path, key))
+}
+
+#' TRUE if a published version of this project already exists.
+publish_exists <- function(project_id) .s3_exists(publish_zip_key(project_id))
+
+#' Publish an archive straight to the Publish folder, replacing that
+#' project's existing published zip (if any).
+#' @return list(project_id, s3_key, file_name, report_key = NULL if no report was saved)
+publish_archive <- function(zip_path, project_id, report_path = NULL) {
+  key <- publish_zip_key(project_id)
+  .s3_put(zip_path, key)
+  list(project_id = safe_project_id(project_id), s3_key = key, file_name = basename(key),
+       report_key = .put_report_for(report_path, key))
+}
+
+#' Promote a draft: copy it to Publish as <project>_CoreVersion.zip, and
+#' only once that copy is confirmed to exist, remove the draft. Refuses to
+#' touch anything outside the Draft prefix.
+#' @param draft_key Full S3 key of the draft (from list_drafts())
+#' @return list(publish_key, file_name, draft_removed = logical)
+move_draft_to_publish <- function(draft_key) {
+  prefix <- paste0(s3_draft_prefix(), "/")
+  if (!startsWith(draft_key, prefix)) stop("That file isn't in the Draft folder - refusing to move it.")
+
+  file_name <- substring(draft_key, nchar(prefix) + 1)
+  if (!grepl("^[A-Za-z0-9_-]+_[0-9]{8}_[0-9]{6}\\.zip$", file_name)) {
+    stop("Unexpected Draft file name (expected <project>_<timestamp>.zip): ", draft_key)
+  }
+  publish_key <- publish_zip_key(project_from_filename(file_name))
+
+  .s3_copy(draft_key, publish_key)
+  if (!.s3_exists(publish_key)) stop("Copy to the Publish folder could not be confirmed - the draft has been left where it is.")
+
+  removed <- tryCatch(.s3_delete(draft_key), error = function(e) FALSE)
+
+  # The draft's report follows it, renamed to match the published zip. Like the
+  # save, a report problem never undoes the (already confirmed) zip move.
+  report_status <- tryCatch({
+    from <- report_key_for_zip(draft_key); to <- report_key_for_zip(publish_key)
+    if (!.s3_exists(from)) "none" else {
+      .s3_copy(from, to)
+      if (!.s3_exists(to)) "failed" else if (isTRUE(tryCatch(.s3_delete(from), error = function(e) FALSE))) "moved" else "copied"
+    }
+  }, error = function(e) "failed")
+
+  list(publish_key = publish_key, file_name = basename(publish_key), draft_removed = isTRUE(removed),
+       report_status = report_status)
+}
+
+#' Download the report that belongs to a zip (Draft or Publish) into `dest`.
+#' @return TRUE if a report existed and was fetched, FALSE if there is none
+fetch_report_for_zip <- function(zip_key, dest) {
+  key <- report_key_for_zip(zip_key)
+  if (!.s3_exists(key)) return(FALSE)
+  .s3_get(key, dest)
+  TRUE
+}
+
+#' List everything under one prefix, newest first, for a table. Folder
+#' placeholder entries (zero-byte keys) are dropped.
+#' @return data.frame(last_modified, project, path, size_mb, s3_key)
+list_s3_folder <- function(prefix_root) {
   empty <- data.frame(
     last_modified = character(), project = character(), path = character(),
-    size_mb = character(), s3_key = character(),
-    stringsAsFactors = FALSE
+    size_mb = character(), s3_key = character(), stringsAsFactors = FALSE
   )
-  if (!nzchar(bucket)) return(empty)
-
-  prefix <- paste0(s3_public_prefix(), "/")
-  objects <- aws.s3::get_bucket_df(bucket = bucket, prefix = prefix, max = Inf)
+  prefix <- paste0(prefix_root, "/")
+  objects <- .s3_list(prefix)
   if (nrow(objects) == 0) return(empty)
 
   objects$Size <- as.numeric(objects$Size)
   objects <- objects[objects$Size > 0, , drop = FALSE]
   if (nrow(objects) == 0) return(empty)
 
-  rel_path <- sub(paste0("^", prefix), "", objects$Key)
+  rel_path <- substring(objects$Key, nchar(prefix) + 1)
   df <- data.frame(
     last_modified = objects$LastModified,
-    project       = sub("/.*$", "", rel_path),
+    project       = project_from_filename(rel_path),
     path          = rel_path,
     size_mb       = sprintf("%.1f MB", objects$Size / 1024^2),
     s3_key        = objects$Key,
@@ -119,14 +199,8 @@ list_archive_history <- function() {
   )
   df[order(df$last_modified, decreasing = TRUE), , drop = FALSE]
 }
+list_drafts    <- function() list_s3_folder(s3_draft_prefix())
+list_published <- function() list_s3_folder(s3_publish_prefix())
 
-#' Fetch a previously saved archive's bytes from S3 directly into a local
-#' file path (for a downloadHandler's `content` function).
-#'
-#' @param s3_key The archive's key in the bucket (from list_archive_history())
-#' @param dest Local path to write the archive to
-fetch_archive_from_s3 <- function(s3_key, dest) {
-  bucket <- s3_bucket_name()
-  aws.s3::save_object(object = s3_key, bucket = bucket, file = dest)
-  invisible(dest)
-}
+#' Fetch a saved archive's bytes from S3 into a local file (for a downloadHandler).
+fetch_archive_from_s3 <- function(s3_key, dest) .s3_get(s3_key, dest)

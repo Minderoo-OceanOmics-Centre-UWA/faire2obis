@@ -5,6 +5,6 @@ account: minderoo-oceanomics-uwa
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 17973015
-bundleId: 12592792
+bundleId: 12602560
 url: https://minderoo-oceanomics-uwa.shinyapps.io/faire2obis/
 version: 1

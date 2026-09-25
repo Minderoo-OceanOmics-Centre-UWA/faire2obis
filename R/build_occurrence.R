@@ -5,6 +5,13 @@
 # the full design rationale (the "dropped" placeholder handling, etc.).
 
 resolve_scientific_name <- function(taxa) {
+  # nt-database files label unidentified sequences "not applicable: domain
+  # level dropped"; curated files use plain "not applicable". Same meaning.
+  taxa$taxonRank <- dplyr::if_else(
+    !is.na(taxa$taxonRank) & startsWith(taxa$taxonRank, "not applicable"),
+    "not applicable", taxa$taxonRank
+  )
+
   rank_col <- list(
     species = "scientificName",
     genus   = "genus",

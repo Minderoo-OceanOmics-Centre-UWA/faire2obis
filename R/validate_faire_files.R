@@ -27,13 +27,55 @@ REQUIRED_SAMPLE_COLUMNS <- c("samp_name", "samp_category", "eventDate", "decimal
 #' @param sample_category_keep The samp_category value marking a real (non-control) sample
 #' @param georeference_sources Current value (NA if not yet supplied by the user)
 #' @param associated_sequences_uri Current value (NA if not yet supplied by the user)
+#' @param reference_db "curated" or "nt" - the type of FAIRe file this publication uses
+#' @param input_filenames Named list: assay name -> the file's ORIGINAL name (used to
+#'   check every file matches reference_db; skipped if either is NULL)
 #' @return list(issues = list of issue objects, any_blocking = logical)
 validate_faire_files <- function(input_files,
                                   sample_category_keep,
                                   georeference_sources = NA_character_,
-                                  associated_sequences_uri = NA_character_) {
+                                  associated_sequences_uri = NA_character_,
+                                  reference_db = NULL,
+                                  input_filenames = NULL) {
   issues <- list()
   add_issue <- function(issue) issues[[length(issues) + 1]] <<- issue
+
+  # ---- 0. Every file must be the same type (curated vs nt) ---------------
+  if (!is.null(reference_db) && !is.null(input_filenames)) {
+    chosen_label <- names(REFERENCE_DB_CHOICES)[REFERENCE_DB_CHOICES == reference_db]
+    detected <- vapply(names(input_files), function(a) detect_reference_db_from_filename(input_filenames[[a]]), character(1))
+
+    wrong <- names(detected)[!is.na(detected) & detected != reference_db]
+    if (length(wrong) > 0) {
+      add_issue(list(
+        id = "reference_db_mismatch",
+        severity = "error",
+        title = "File type doesn't match the selected reference database",
+        message = paste0(
+          "You selected \"", chosen_label, "\", but these files look like the other type: ",
+          paste0(wrong, " (", vapply(wrong, function(a) input_filenames[[a]], character(1)), ")", collapse = ", "),
+          ". A publication must use only curated-database files or only NCBI nt files, not a mix. ",
+          "Re-upload matching files, or change the selection in Step 1."
+        ),
+        fix_type = "blocking_error"
+      ))
+    }
+
+    unknown <- names(detected)[is.na(detected)]
+    if (length(unknown) > 0) {
+      add_issue(list(
+        id = "reference_db_unverified",
+        severity = "warning",
+        title = "Couldn't confirm the file type from the filename",
+        message = paste0(
+          "The filename doesn't say curated or nt for: ",
+          paste0(unknown, " (", vapply(unknown, function(a) input_filenames[[a]], character(1)), ")", collapse = ", "),
+          ". Please check yourself that these are all \"", chosen_label, "\" files."
+        ),
+        fix_type = "info_only"
+      ))
+    }
+  }
 
   # ---- 1. Required sheets present in every uploaded file ----------------
   sheet_lists <- list()

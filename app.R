@@ -34,10 +34,19 @@ library(dplyr)
 library(ggplot2)
 library(zip)
 
+# AWS settings for saving to Draft/Publish live in .Renviron next to app.R.
+# R only reads that file automatically when it STARTS in this folder, so load
+# it explicitly - a local run then uses the same bucket as the deployed app.
+if (file.exists(".Renviron")) readRenviron(".Renviron")
+
 source("R/faire_io.R")
 source("R/validate_faire_files.R")
 source("R/suggest_assay_mapping.R")
 source("R/detect_assay_name.R")
+source("R/detect_reference_db.R")
+source("R/check_dwc_mapping.R")
+source("R/taxon_lookup.R")
+source("R/build_report.R")
 source("R/build_event_core.R")
 source("R/build_occurrence.R")
 source("R/build_dna_extension.R")
@@ -50,6 +59,34 @@ source("R/archive_history.R")
 # Converts a scientific name into a safe Shiny input-id fragment (no
 # spaces/punctuation) for the Step 4 per-name review widgets.
 safe_id <- function(x) gsub("[^A-Za-z0-9]", "_", x)
+
+# Success popup (SweetAlert-style): big green tick, title, details, and an
+# optional button that jumps to the tab where the result now lives.
+success_modal <- function(title, details, go_tab = NULL, go_label = NULL) {
+  modalDialog(
+    div(class = "text-center py-3",
+        div(style = "font-size: 4.5rem; color: #1a9850; line-height: 1;", bsicons::bs_icon("check-circle-fill")),
+        h3(title, class = "mt-3 mb-2", style = "font-weight: 700;"),
+        div(class = "text-muted", details)),
+    footer = div(class = "w-100 d-flex justify-content-center gap-2",
+                 if (!is.null(go_tab)) actionButton("go_to_saved_tab", go_label, class = "btn-primary"),
+                 modalButton("Close")),
+    size = "m", easyClose = TRUE
+  )
+}
+
+# "Check" button for a name in the Taxonomy Review step: opens the WoRMS /
+# FishBase lookup popup. If from_input is given, the current text of that
+# input (e.g. the user's edited correction) is checked instead of the name.
+taxon_check_button <- function(nm, from_input = NULL) {
+  js <- if (is.null(from_input)) {
+    "Shiny.setInputValue('taxon_check', this.getAttribute('data-taxon'), {priority: 'event'})"
+  } else {
+    sprintf("var v = document.getElementById('%s').value; Shiny.setInputValue('taxon_check', v || this.getAttribute('data-taxon'), {priority: 'event'})", from_input)
+  }
+  tags$button(type = "button", class = "btn btn-sm btn-outline-primary", `data-taxon` = nm, onclick = js,
+              bsicons::bs_icon("search"), " Check")
+}
 
 # Defined once, used both as the Step 6 license selectInput's choices
 # (label = name, value = URL) and to look the label back up from the
@@ -440,11 +477,11 @@ ui <- page_fluid(
       '))
   ),
 
-  # Top-level tab bar: "Generate" (the step wizard) and "History" (past
-  # archives, independent of wherever the wizard currently is) - the two
-  # main sections of the app. History's own content lives in a dedicated
-  # uiOutput (history_tab_body) so switching tabs never disturbs wizard
-  # state, the same reasoning as each step having its own renderUI.
+  # Top-level tab bar: "Generate" (the step wizard), "Draft" (saved
+  # work-in-progress archives) and "Publish" (archives ready to send to
+  # OBIS), independent of wherever the wizard currently is. Each tab's
+  # content lives in a dedicated uiOutput so switching tabs never disturbs
+  # wizard state, the same reasoning as each step having its own renderUI.
   navset_tab(
     id = "main_tab",
     nav_panel(
@@ -467,6 +504,13 @@ ui <- page_fluid(
             card(
               card_header(bsicons::bs_icon("file-earmark-spreadsheet", class = "section-icon"), "Assay files"),
               card_body(
+                radioButtons("reference_db", "Type of FAIRe files for this publication",
+                             choices = REFERENCE_DB_CHOICES, selected = "curated", inline = TRUE),
+                div(class = "alert alert-info py-2",
+                    bsicons::bs_icon("info-circle-fill"), " ",
+                    tags$b("Use one type only."),
+                    " Every assay file in a publication must be a curated-database file OR an NCBI nt file - never a mix of the two. ",
+                    "Choose the type above, then upload the matching files (the filename should contain \"curateddb\" or \"nt\")."),
                 p(class = "muted", "Add one FAIRe .xlsx file per assay run on this project's samples. All assays must share the same physical samples."),
                 div(id = "assay_rows_container", assay_row_ui(1)),
                 actionButton("add_assay", tagList(bsicons::bs_icon("plus-lg"), " Add another assay"), class = "btn-outline-secondary btn-sm")
@@ -493,8 +537,12 @@ ui <- page_fluid(
       )
     ),
     nav_panel(
-      "History",
-      div(class = "content-wrap", uiOutput("history_tab_body"))
+      "Draft",
+      div(class = "content-wrap", uiOutput("draft_tab_body"))
+    ),
+    nav_panel(
+      "Publish",
+      div(class = "content-wrap", uiOutput("publish_tab_body"))
     )
   ),
 
@@ -532,15 +580,15 @@ server <- function(input, output, session) {
     build_result    = NULL,   # list(event_core, controls, occurrence, dna_extension)
     build_error     = NULL,
     worms_result       = NULL,   # match_worms() output
+    taxonomy_rechecks  = 0,      # times "Apply & re-check" has been run on the current build
     name_corrections   = character(),  # user-entered corrections for unmatched names, this session
     manual_aphia_overrides = c(),      # user-chosen AphiaIDs for ambiguous names, this session
     qc_result       = NULL,  # run_qc_checks() output
     eml_xml         = NULL   # build_eml_xml() output (Step 6)
   )
 
-  # Bumped after a successful save_archive_to_s3() to invalidate the
-  # Step 7 history table so a newly-generated archive shows up without
-  # requiring a manual page refresh.
+  # Bumped after any save/publish/move (or a Refresh click) to re-list the
+  # Draft and Publish tables without requiring a manual page refresh.
   history_refresh <- reactiveVal(0)
 
   output$current_step_num <- renderText({ as.character(rv$current_step) })
@@ -594,6 +642,16 @@ server <- function(input, output, session) {
       observeEvent(input[[paste0("assay_file_", this_id)]], {
         file_val <- input[[paste0("assay_file_", this_id)]]
         req(file_val)
+        file_db <- detect_reference_db_from_filename(file_val$name)
+        if (!is.na(file_db) && !is.null(input$reference_db) && file_db != input$reference_db) {
+          showNotification(
+            paste0("This looks like a \"", names(REFERENCE_DB_CHOICES)[REFERENCE_DB_CHOICES == file_db],
+                   "\" file, but the selected type is \"",
+                   names(REFERENCE_DB_CHOICES)[REFERENCE_DB_CHOICES == input$reference_db],
+                   "\". Change the selection above or upload a matching file."),
+            type = "warning", duration = 8
+          )
+        }
         detected <- tryCatch(detect_assay_name_combined(file_val$datapath, file_val$name), error = function(e) NA_character_)
         if (!is.na(detected)) {
           updateTextInput(session, paste0("assay_name_", this_id), value = detected)
@@ -751,6 +809,18 @@ server <- function(input, output, session) {
     files
   })
 
+  get_input_filenames <- reactive({
+    names_list <- list()
+    for (i in rv$assay_ids) {
+      name_val <- input[[paste0("assay_name_", i)]]
+      file_val <- input[[paste0("assay_file_", i)]]
+      if (!is.null(name_val) && nzchar(name_val) && !is.null(file_val)) {
+        names_list[[name_val]] <- file_val$name
+      }
+    }
+    names_list
+  })
+
   observeEvent(input$to_step2, {
     input_files <- get_input_files()
 
@@ -765,7 +835,9 @@ server <- function(input, output, session) {
           input_files               = input_files,
           sample_category_keep      = input$sample_category_keep,
           georeference_sources      = rv$answers$georeference_sources,
-          associated_sequences_uri  = rv$answers$associated_sequences_uri
+          associated_sequences_uri  = rv$answers$associated_sequences_uri,
+          reference_db              = input$reference_db,
+          input_filenames           = get_input_filenames()
         ),
         error = function(e) {
           showNotification(paste("Validation error:", conditionMessage(e)), type = "error", duration = NULL)
@@ -802,7 +874,7 @@ server <- function(input, output, session) {
           div(
             actionButton("revalidate", tagList(bsicons::bs_icon("arrow-repeat"), " Re-check"), class = "btn-outline-secondary"),
             actionButton("to_step3", tagList("Continue ", bsicons::bs_icon("arrow-right")), class = "btn-primary",
-                         disabled = if (isTRUE(rv$validation$any_blocking)) "disabled" else NULL)
+                         disabled = isTRUE(rv$validation$any_blocking))
           )
       ),
       if (isTRUE(rv$validation$any_blocking))
@@ -882,7 +954,9 @@ server <- function(input, output, session) {
         input_files               = get_input_files(),
         sample_category_keep      = input$sample_category_keep,
         georeference_sources      = rv$answers$georeference_sources,
-        associated_sequences_uri  = rv$answers$associated_sequences_uri
+        associated_sequences_uri  = rv$answers$associated_sequences_uri,
+        reference_db              = input$reference_db,
+        input_filenames           = get_input_filenames()
       )
       incProgress(0.7)
     })
@@ -1020,6 +1094,7 @@ server <- function(input, output, session) {
       # computed against the old data - clear them so Step 4/5 show a
       # fresh "run" prompt instead of a stale result from before.
       rv$worms_result <- NULL
+      rv$taxonomy_rechecks <- 0
       rv$qc_result     <- NULL
       showNotification("Build complete.", type = "message")
     }
@@ -1045,11 +1120,57 @@ server <- function(input, output, session) {
           )
         )
       ),
+      render_mapping_card(r),
       div(style = "text-align: right;",
           actionButton("to_step4", tagList("Continue to Taxonomy Review ", bsicons::bs_icon("arrow-right")), class = "btn-primary")
       )
     )
   })
+
+  render_mapping_card <- function(r) {
+    m <- tryCatch(check_dwc_mapping(r$event_core, r$occurrence, r$dna_extension), error = function(e) NULL)
+    if (is.null(m)) return(NULL)
+
+    n_total <- nrow(m)
+    problems <- m[m$status %in% c("not_a_term", "wrong_type"), , drop = FALSE]
+    notes <- m[m$status == "expected", , drop = FALSE]
+
+    badge <- function(status) {
+      switch(status,
+        not_a_term = span(class = "badge bg-warning text-dark", "Not a Darwin Core term"),
+        wrong_type = span(class = "badge bg-danger", "Wrong data type"),
+        expected   = span(class = "badge bg-secondary", "Expected")
+      )
+    }
+    rows_ui <- function(df) tags$table(class = "table table-sm align-middle",
+      tags$thead(tags$tr(tags$th("Table"), tags$th("Column"), tags$th("Status"), tags$th("What it means"))),
+      tags$tbody(lapply(seq_len(nrow(df)), function(i) {
+        tags$tr(tags$td(df$table[i]), tags$td(tags$code(df$column[i])), tags$td(badge(df$status[i])), tags$td(class = "muted", df$detail[i]))
+      }))
+    )
+
+    card(
+      card_header(bsicons::bs_icon("signpost-split", class = "section-icon"), "Darwin Core mapping check"),
+      card_body(
+        p(class = "muted", "This is what the IPT mapping screen will complain about. It compares every column against the official GBIF Darwin Core definitions."),
+        if (nrow(problems) == 0) {
+          div(class = "alert alert-success d-flex align-items-center gap-2",
+              bsicons::bs_icon("check-circle-fill"),
+              paste0("All ", n_total - nrow(notes), " columns map to a Darwin Core term with a valid data type."))
+        } else {
+          tagList(
+            div(class = "alert alert-warning",
+                bsicons::bs_icon("exclamation-triangle-fill"), " ",
+                paste0(nrow(problems), " column(s) will not map cleanly. Fix these in your FAIRe file or pipeline before uploading to the IPT.")),
+            rows_ui(problems)
+          )
+        },
+        if (nrow(notes) > 0) {
+          tags$details(tags$summary(class = "muted", paste0(nrow(notes), " expected note(s)")), rows_ui(notes))
+        }
+      )
+    )
+  }
 
   observeEvent(input$to_step4, { rv$current_step <- 4 })
 
@@ -1083,6 +1204,22 @@ server <- function(input, output, session) {
 
   observeEvent(input$run_worms, { run_worms_matching() })
 
+  show_taxon_modal <- function(query) {
+    query <- trimws(query %||% "")
+    if (!nzchar(query)) {
+      showNotification("Type a scientific name or an AphiaID first.", type = "warning")
+      return()
+    }
+    res <- withProgress(message = "Looking up in WoRMS...", value = 0.5, lookup_taxon(query))
+    showModal(modalDialog(
+      title = tagList(bsicons::bs_icon("search"), " ", query),
+      size = "xl", easyClose = TRUE, footer = modalButton("Close"),
+      taxon_lookup_body(res, query)
+    ))
+  }
+  observeEvent(input$taxon_check, { show_taxon_modal(input$taxon_check) })
+  observeEvent(input$taxon_lookup_btn, { show_taxon_modal(input$taxon_query) })
+
   output$step4_body <- renderUI({
     req(rv$build_result)
 
@@ -1106,6 +1243,8 @@ server <- function(input, output, session) {
     unmatched_names <- r$unmatched_names
     n_matched <- length(unique(r$matched_df$queriedName))
     n_auto <- length(unique(r$resolved_ambiguous_df$queriedName))
+    n_issues <- length(ambiguous_names) + length(unmatched_names)
+    has_issues <- n_issues > 0
 
     stat_box <- function(value, label) div(class = "stat-box", div(class = "stat-value", value), div(class = "stat-label", label))
 
@@ -1123,6 +1262,17 @@ server <- function(input, output, session) {
         )
       ),
 
+      card(
+        card_header(bsicons::bs_icon("search", class = "section-icon"), "Check a name or AphiaID"),
+        card_body(
+          p(class = "muted", "Look up any scientific name or WoRMS AphiaID and compare it with WoRMS and FishBase without leaving the app. Every name below also has its own Check button."),
+          div(class = "d-flex gap-2 align-items-start",
+              div(style = "flex: 1;", textInput("taxon_query", NULL, placeholder = "e.g. Gadus morhua  or  126436", width = "100%")),
+              actionButton("taxon_lookup_btn", tagList(bsicons::bs_icon("search"), " Look up"), class = "btn-primary")
+          )
+        )
+      ),
+
       if (length(ambiguous_names) > 0) {
         card(
           class = "issue-card",
@@ -1136,8 +1286,11 @@ server <- function(input, output, session) {
                 paste0(cand$AphiaID, " — ", cand$scientificname, " (", cand$status, ", ", cand$rank, ", marine=", cand$isMarine, ")")
               )
               div(class = "assay-row",
-                  strong(nm),
-                  selectInput(paste0("choose_aphia_", safe_id(nm)), NULL, choices = c("Leave unresolved" = "", choices))
+                  div(class = "d-flex align-items-center gap-2", strong(nm), taxon_check_button(nm)),
+                  selectInput(paste0("choose_aphia_", safe_id(nm)), NULL, choices = c("Leave unresolved" = "", choices)),
+                  div(class = "muted", "Open a candidate in WoRMS: ",
+                      lapply(cand$AphiaID, function(id) tagList(
+                        tags$a(href = worms_taxon_url(id), target = "_blank", rel = "noopener noreferrer", paste0(id, " ↗")), " ")))
               )
             }))
           )
@@ -1156,6 +1309,7 @@ server <- function(input, output, session) {
               div(class = "assay-row",
                   div(class = "d-flex align-items-center gap-2",
                       strong(nm),
+                      taxon_check_button(nm, paste0("correct_name_", safe_id(nm))),
                       if (has_suggestion) {
                         span(class = "badge bg-primary-subtle text-primary-emphasis",
                              bsicons::bs_icon("stars"), " Suggested via WoRMS fuzzy match - please verify")
@@ -1180,13 +1334,33 @@ server <- function(input, output, session) {
         )
       },
 
+      if (has_issues) {
+        div(class = "alert alert-warning",
+            bsicons::bs_icon("exclamation-triangle-fill"), " ",
+            paste0(n_issues, " name(s) still need attention. Choose a fix for each one above, then click "),
+            tags$b("Apply & re-check"),
+            ". Continue unlocks once no ambiguous or unmatched names remain - choices that aren't applied are not used.",
+            if (rv$taxonomy_rechecks >= 1) {
+              tagList(
+                hr(class = "my-2"),
+                checkboxInput("allow_unresolved",
+                              "I've checked the remaining name(s) and they can't be resolved - continue and publish them without a scientificNameID (clear any fix boxes first).",
+                              value = FALSE),
+                tags$script(HTML("$(document).off('change.taxunlock', '#allow_unresolved').on('change.taxunlock', '#allow_unresolved', function() { $('#to_step5').prop('disabled', !this.checked); });"))
+              )
+            }
+        )
+      },
+
       div(class = "nav-row",
           actionButton("back_to_3_from_4", tagList(bsicons::bs_icon("arrow-left"), " Back"), class = "btn-outline-secondary"),
           div(
-            if (length(ambiguous_names) > 0 || length(unmatched_names) > 0) {
-              actionButton("apply_corrections", tagList(bsicons::bs_icon("arrow-repeat"), " Apply & re-check"), class = "btn-outline-secondary")
+            if (has_issues) {
+              actionButton("apply_corrections", tagList(bsicons::bs_icon("arrow-repeat"), " Apply & re-check"), class = "btn-primary")
             },
-            actionButton("to_step5", tagList("Continue to QC Checks ", bsicons::bs_icon("arrow-right")), class = "btn-primary")
+            actionButton("to_step5", tagList("Continue to QC Checks ", bsicons::bs_icon("arrow-right")),
+                         class = if (has_issues) "btn-outline-secondary" else "btn-primary",
+                         disabled = has_issues)
           )
       )
     )
@@ -1211,11 +1385,33 @@ server <- function(input, output, session) {
       val <- input[[paste0("correct_name_", safe_id(nm))]]
       if (!is.null(val) && nzchar(val)) rv$name_corrections[nm] <- val
     }
+    rv$taxonomy_rechecks <- rv$taxonomy_rechecks + 1
     run_worms_matching()
   })
 
   observeEvent(input$back_to_3_from_4, { rv$current_step <- 3 })
-  observeEvent(input$to_step5, { rv$current_step <- 5 })
+  observeEvent(input$to_step5, {
+    req(rv$worms_result)
+    r <- rv$worms_result
+    ambiguous_names <- unique(r$ambiguous_df$queriedName)
+    unmatched_names <- r$unmatched_names
+
+    if (length(ambiguous_names) > 0 || length(unmatched_names) > 0) {
+      if (!isTRUE(input$allow_unresolved)) {
+        showNotification("Apply your fixes and re-check first - some names still need attention.", type = "warning")
+        return()
+      }
+      pending <- c(
+        vapply(ambiguous_names, function(nm) nzchar(input[[paste0("choose_aphia_", safe_id(nm))]] %||% ""), logical(1)),
+        vapply(unmatched_names, function(nm) nzchar(input[[paste0("correct_name_", safe_id(nm))]] %||% ""), logical(1))
+      )
+      if (any(pending)) {
+        showNotification("Some fixes are selected but not applied. Click Apply & re-check, or clear them to leave those names unresolved.", type = "warning", duration = 8)
+        return()
+      }
+    }
+    rv$current_step <- 5
+  })
 
   # =====================================================================
   # STEP 5 - QC Checks
@@ -1609,16 +1805,14 @@ server <- function(input, output, session) {
     req(rv$build_result, rv$worms_result)
     tagList(
       card(
-        card_header(bsicons::bs_icon("people-fill", class = "section-icon"), "Samples"),
-        card_body(plotOutput("chart_samples", height = "300px"))
-      ),
-      card(
-        card_header(bsicons::bs_icon("bar-chart-fill", class = "section-icon"), "Detections per assay"),
-        card_body(plotOutput("chart_detections", height = "300px"))
-      ),
-      card(
-        card_header(bsicons::bs_icon("check2-square", class = "section-icon"), "Taxonomy resolution"),
-        card_body(tableOutput("taxonomy_table"))
+        card_header(bsicons::bs_icon("file-earmark-bar-graph", class = "section-icon"), "Analysis report"),
+        card_body(
+          p(class = "muted", "A one-page summary of this archive. It is saved with the archive (in the Report folder, under the same name) when you choose Save as draft or Publish below."),
+          uiOutput("report_preview"),
+          div(class = "d-flex gap-2 mt-3",
+              actionButton("view_report_full", tagList(bsicons::bs_icon("arrows-fullscreen"), " View full size"), class = "btn-outline-primary btn-sm"),
+              downloadButton("download_report_png", "Download report (.png)", class = "btn-outline-primary btn-sm"))
+        )
       ),
       card(
         card_header(bsicons::bs_icon("download", class = "section-icon"), "Download"),
@@ -1628,72 +1822,112 @@ server <- function(input, output, session) {
             if (!is.null(rv$eml_xml)) ", and eml.xml" else " (no eml.xml - go back to Step 6 to generate one)",
             " - ready to upload to an IPT."
           )),
-          downloadButton("download_archive", "Download archive (.zip)", class = "btn-primary"),
-          if (archive_history_enabled())
-            p(class = "muted", style = "margin-top: 8px;", "Every archive generated here is also saved to the History tab.")
+          downloadButton("download_archive", "Download archive (.zip)", class = "btn-primary")
+        )
+      ),
+      card(
+        card_header(bsicons::bs_icon("cloud-upload", class = "section-icon"), "Save this archive"),
+        card_body(
+          if (!archive_history_enabled()) {
+            p(class = "muted", "Saving to Draft or Publish isn't available here (no AWS credentials set). You can still download the archive above.")
+          } else {
+            tagList(
+              p(class = "muted", "Choose where this archive goes before you finish. You can review drafts later and publish them from the Draft tab."),
+              radioButtons("archive_destination", NULL, selected = "draft",
+                choiceValues = c("draft", "publish"),
+                choiceNames = list(
+                  tagList(tags$b("Save as draft"), tags$br(), span(class = "muted", "Keep it as a draft, named with a timestamp. Nothing is sent to OBIS.")),
+                  tagList(tags$b("Publish"), tags$br(), span(class = "muted", "Put it in the Publish folder as PROJECT_CoreVersion.zip, where it will be sent to OBIS."))
+                )),
+              actionButton("save_archive_btn", tagList(bsicons::bs_icon("cloud-upload"), " Save"), class = "btn-primary"),
+              uiOutput("save_archive_status")
+            )
+          }
         )
       ),
       div(class = "nav-row", actionButton("back_to_6_from_7", tagList(bsicons::bs_icon("arrow-left"), " Back"), class = "btn-outline-secondary"), div())
     )
   })
 
-  chart_theme <- theme_minimal(base_size = 14) +
-    theme(axis.title = element_blank(), panel.grid.minor = element_blank(),
-          panel.grid.major.x = element_blank(), legend.position = "none")
-
-  output$chart_samples <- renderPlot({
-    req(rv$build_result)
-    samples <- tibble(
-      category = factor(c("Real samples (in the archive)", "Controls (excluded)"),
-                         levels = c("Real samples (in the archive)", "Controls (excluded)")),
-      n = c(nrow(rv$build_result$event_core), nrow(rv$build_result$controls)),
-      is_real = c(TRUE, FALSE)
-    )
-    ggplot(samples, aes(x = category, y = n, fill = is_real)) +
-      geom_col(width = 0.5) +
-      geom_text(aes(label = n), vjust = -0.6, fontface = "bold", size = 5) +
-      scale_fill_manual(values = c(`TRUE` = "#2a78d6", `FALSE` = "#c3c2b7")) +
-      scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
-      chart_theme
-  })
-
-  output$chart_detections <- renderPlot({
-    req(rv$build_result)
-    df <- tibble(assay = names(rv$build_result$occurrence), n = vapply(rv$build_result$occurrence, nrow, integer(1)))
-    ggplot(df, aes(x = assay, y = n)) +
-      geom_col(fill = "#2a78d6", width = 0.45) +
-      geom_text(aes(label = format(n, big.mark = ",")), vjust = -0.6, fontface = "bold", size = 5) +
-      scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.15))) +
-      chart_theme
-  })
-
-  output$taxonomy_table <- renderTable({
-    req(rv$worms_result)
+  # ---- Analysis report (drawn once per set of results, shown here and saved with the archive) ----
+  current_report_info <- function() {
     r <- rv$worms_result
+    n_manual <- n_auto <- 0
     if (nrow(r$resolved_ambiguous_df) > 0) {
       n_manual <- length(unique(r$resolved_ambiguous_df$queriedName[r$resolved_ambiguous_df$resolution == "manual_override"]))
       n_auto   <- length(unique(r$resolved_ambiguous_df$queriedName[r$resolved_ambiguous_df$resolution == "single_accepted"]))
-    } else {
-      n_manual <- 0
-      n_auto   <- 0
     }
-    n_matched  <- length(unique(r$matched_df$queriedName))
-    n_direct   <- n_matched - n_auto - n_manual
-    n_corrected <- length(rv$name_corrections)
-    n_ambiguous <- length(unique(r$ambiguous_df$queriedName))
-    n_unmatched <- length(r$unmatched_names)
-
-    tibble(
+    n_matched <- length(unique(r$matched_df$queriedName))
+    taxonomy_df <- tibble(
       Resolution = c("Matched directly", "Corrected by you, then matched", "Auto-resolved (single accepted WoRMS record)",
-                      "Manually resolved by you", "Still ambiguous", "Still unmatched"),
-      Names = c(n_direct, n_corrected, n_auto, n_manual, n_ambiguous, n_unmatched)
+                     "Manually resolved by you", "Still ambiguous", "Still unmatched"),
+      Names = c(n_matched - n_auto - n_manual, length(rv$name_corrections), n_auto, n_manual,
+                length(unique(r$ambiguous_df$queriedName)), length(r$unmatched_names))
     )
+
+    m <- tryCatch(check_dwc_mapping(rv$build_result$event_core, r$occurrence_tables, rv$build_result$dna_extension), error = function(e) NULL)
+    mapping <- if (is.null(m)) NULL else list(ok = sum(m$status %in% c("ok", "expected")), total = nrow(m),
+                                              issues = sum(m$status %in% c("not_a_term", "wrong_type")))
+    qc <- if (is.null(rv$qc_result)) NULL else list(
+      passed = sum(vapply(rv$qc_result$results, function(x) !is.data.frame(x) || nrow(x) == 0, logical(1))),
+      total = length(rv$qc_result$results), skipped = length(rv$qc_result$any_skipped))
+
+    first_text <- function(...) { v <- c(...); v <- trimws(v[!is.na(v)]); v <- v[nzchar(v)]; if (length(v)) v[1] else NULL }
+    first_para <- function(x) strsplit(x %||% "", "\n")[[1]][1]
+
+    list(
+      project_id = trimws(input$project_id %||% ""),
+      title = first_text(input$eml_title, input$eml_project_title),
+      description = first_text(first_para(input$eml_abstract), first_para(input$eml_project_abstract)),
+      generated = Sys.time(),
+      reference_db_label = names(REFERENCE_DB_CHOICES)[REFERENCE_DB_CHOICES == (input$reference_db %||% "curated")],
+      event_core = rv$build_result$event_core, n_controls = nrow(rv$build_result$controls),
+      occurrence_tables = r$occurrence_tables, taxonomy_df = taxonomy_df, qc = qc, mapping = mapping
+    )
+  }
+
+  report_file <- reactive({
+    req(rv$build_result, rv$worms_result)
+    path <- tempfile(fileext = ".png")
+    build_report_png(path, current_report_info())
+    path
   })
 
-  output$download_archive <- downloadHandler(
-    filename = function() paste0("faire2obis_archive_", format(Sys.Date(), "%Y%m%d"), ".zip"),
-    content = function(file) {
-      req(rv$build_result, rv$worms_result)
+  report_data_uri <- function(path) base64enc::dataURI(file = path, mime = "image/png")
+
+  output$report_preview <- renderUI({
+    img(src = report_data_uri(report_file()), alt = "Analysis report",
+        style = "width: 100%; max-width: 820px; display: block; margin: 0 auto; border: 1px solid #eceae4; border-radius: 10px;")
+  })
+
+  output$download_report_png <- downloadHandler(
+    filename = function() paste0(safe_project_id(input$project_id), "_report_", format(Sys.Date(), "%Y%m%d"), ".png"),
+    content = function(file) file.copy(report_file(), file, overwrite = TRUE)
+  )
+
+  # One popup used for the report in Step 7 and for saved reports in the Draft/Publish tabs.
+  viewed_report <- reactiveVal(NULL)
+  show_report_modal <- function(path, title) {
+    viewed_report(list(path = path, name = title))
+    showModal(modalDialog(
+      title = tagList(bsicons::bs_icon("file-earmark-bar-graph"), " ", title),
+      div(style = "max-height: 75vh; overflow-y: auto;",
+          img(src = report_data_uri(path), alt = title, style = "width: 100%; display: block;")),
+      footer = tagList(downloadButton("download_viewed_report", "Download", class = "btn-outline-primary"), modalButton("Close")),
+      size = "l", easyClose = TRUE
+    ))
+  }
+  output$download_viewed_report <- downloadHandler(
+    filename = function() { v <- viewed_report(); req(v); v$name },
+    content = function(file) { v <- viewed_report(); req(v); file.copy(v$path, file, overwrite = TRUE) }
+  )
+  observeEvent(input$view_report_full, {
+    show_report_modal(report_file(), paste0(safe_project_id(input$project_id), "_report.png"))
+  })
+
+  # Builds the archive zip at `file`. Shared by the Download button and the
+  # Draft / Publish save, so all three always produce the identical archive.
+  build_archive_zip <- function(file) {
       tmpdir <- tempfile("faire2obis_")
       dir.create(tmpdir, recursive = TRUE)
 
@@ -1718,80 +1952,272 @@ server <- function(input, output, session) {
       on.exit(setwd(old_wd))
       zip::zip(file, files = list.files(".", recursive = TRUE))
       setwd(old_wd)
+  }
 
-      if (archive_history_enabled()) {
-        tryCatch({
-          save_archive_to_s3(file, input$project_id, names(rv$build_result$dna_extension))
-          history_refresh(isolate(history_refresh()) + 1)
-        }, error = function(e) {
-          showNotification(paste("Archive downloaded, but saving it to history failed:", conditionMessage(e)), type = "warning", duration = 8)
-        })
-      }
+  output$download_archive <- downloadHandler(
+    filename = function() paste0("faire2obis_archive_", format(Sys.Date(), "%Y%m%d"), ".zip"),
+    content = function(file) {
+      req(rv$build_result, rv$worms_result)
+      build_archive_zip(file)
     }
   )
 
-  # ---- History tab (only functional when AWS credentials are set) --------
-  archive_history_df <- reactive({
+  # ---- Step 7: save as Draft or Publish ----------------------------------
+  save_status <- reactiveVal(NULL)
+  output$save_archive_status <- renderUI(save_status())
+
+  save_current_archive <- function(saver, label) {
+    zip_path <- tempfile(fileext = ".zip")
+    on.exit(unlink(zip_path), add = TRUE)
+    res <- withProgress(message = paste0(label, "..."), value = 0.4, {
+      tryCatch({
+        build_archive_zip(zip_path)
+        incProgress(0.2)
+        # The report is saved with the zip under the same name; if it can't be drawn,
+        # the archive is still saved (and the user is told).
+        report_path <- tryCatch(report_file(), error = function(e) {
+          showNotification(paste0("The analysis report couldn't be generated (", conditionMessage(e), ") - saving the archive without it."),
+                           type = "warning", duration = 10)
+          NULL
+        })
+        incProgress(0.2)
+        saver(zip_path, trimws(input$project_id), report_path)
+      }, error = function(e) e)
+    })
+    if (inherits(res, "error")) {
+      showNotification(paste0(label, " failed: ", conditionMessage(res)), type = "error", duration = NULL)
+      return(NULL)
+    }
+    history_refresh(isolate(history_refresh()) + 1)
+    res
+  }
+
+  observeEvent(input$save_archive_btn, {
+    req(rv$build_result, rv$worms_result)
+    project <- trimws(input$project_id %||% "")
+    if (!nzchar(project)) {
+      showNotification("Enter a Project ID in Step 1 first - it names the saved file.", type = "error")
+      return()
+    }
+
+    if (identical(input$archive_destination, "publish")) {
+      already <- tryCatch(publish_exists(project), error = function(e) FALSE)
+      showModal(modalDialog(
+        title = "Publish this archive?",
+        p("This will put ", tags$b(paste0(safe_project_id(project), "_CoreVersion.zip")),
+          " in the Publish folder, where it will be sent to OBIS."),
+        if (already) div(class = "alert alert-warning",
+                          "A published version of this project already exists and will be replaced."),
+        footer = tagList(modalButton("Cancel"), actionButton("confirm_publish", "Yes, publish", class = "btn-primary")),
+        easyClose = TRUE
+      ))
+    } else {
+      res <- save_current_archive(save_archive_as_draft, "Saving draft")
+      if (!is.null(res)) {
+        save_status(div(class = "alert alert-success mt-3",
+                        bsicons::bs_icon("check-circle-fill"), " Saved as draft: ", tags$b(res$file_name),
+                        ". Find it in the Draft tab - you can publish it from there."))
+        popup_tab("Draft")
+        showModal(success_modal(
+          "Draft saved successfully",
+          tagList("Your archive was saved as ", tags$b(res$file_name), ".", tags$br(),
+                  report_line(res$report_key), tags$br(),
+                  "It stays a draft until you move it to Publish from the Draft tab."),
+          "Draft", "View in Draft tab"))
+      }
+    }
+  })
+
+  observeEvent(input$confirm_publish, {
+    removeModal()
+    res <- save_current_archive(publish_archive, "Publishing")
+    if (!is.null(res)) {
+      save_status(div(class = "alert alert-success mt-3",
+                      bsicons::bs_icon("check-circle-fill"), " Published: ", tags$b(res$file_name),
+                      ". It's in the Publish tab, ready to be sent to OBIS."))
+      popup_tab("Publish")
+      showModal(success_modal(
+        "Published successfully",
+        tagList("Your archive was published as ", tags$b(res$file_name), ".", tags$br(),
+                report_line(res$report_key), tags$br(),
+                "It's in the Publish folder, ready to be sent to OBIS."),
+        "Publish", "View in Publish tab"))
+    }
+  })
+
+  report_line <- function(report_key) {
+    if (is.null(report_key)) span(class = "text-warning", "No analysis report was saved with it.")
+    else tagList("Report saved as ", tags$b(basename(report_key)), " in the Report folder.")
+  }
+
+  # Which tab the success popup's button jumps to.
+  popup_tab <- reactiveVal("Draft")
+  observeEvent(input$go_to_saved_tab, {
+    removeModal()
+    nav_select("main_tab", popup_tab())
+  })
+
+  # ---- Draft and Publish tabs (only functional when AWS credentials are set) ----
+  list_or_notify <- function(lister, what) {
     history_refresh()
     req(archive_history_enabled())
-    tryCatch(list_archive_history(), error = function(e) {
-      showNotification(paste("Couldn't load archive history:", conditionMessage(e)), type = "error")
+    tryCatch(lister(), error = function(e) {
+      showNotification(paste0("Couldn't load ", what, ": ", conditionMessage(e)), type = "error")
       NULL
     })
-  })
+  }
+  drafts_df    <- reactive(list_or_notify(list_drafts, "drafts"))
+  published_df <- reactive(list_or_notify(list_published, "published files"))
 
-  output$history_tab_body <- renderUI({
-    if (!archive_history_enabled()) {
-      return(card(
-        card_header(bsicons::bs_icon("clock-history", class = "section-icon"), "History"),
-        card_body(p(class = "muted",
-          "Archive history isn't configured yet for this deployment (no AWS credentials set) - archives generated here aren't saved anywhere permanent."))
-      ))
-    }
-    tagList(
-      card(
-        card_header(bsicons::bs_icon("clock-history", class = "section-icon"), "Public S3 folder contents"),
-        card_body(
-          p(class = "muted", paste0(
-            "Select a row to download it."
-          )),
-          DT::DTOutput("archive_history_table"),
-          div(style = "margin-top: 10px;",
-              downloadButton("download_history_item", "Download selected", class = "btn-outline-primary btn-sm"))
-        )
-      )
-    )
-  })
+  not_configured_card <- function(title) card(
+    card_header(bsicons::bs_icon("cloud-slash", class = "section-icon"), title),
+    card_body(p(class = "muted", "Not configured for this deployment (no AWS credentials set) - archives generated here aren't saved anywhere permanent."))
+  )
 
-  output$archive_history_table <- DT::renderDT({
-    df <- archive_history_df()
+  render_archive_table <- function(df_reactive) DT::renderDT({
+    df <- df_reactive()
     req(df)
     DT::datatable(
       df[, c("last_modified", "project", "path", "size_mb")],
       selection = "single", rownames = TRUE,
       # Positional, not named - with rownames = TRUE the row-number
       # column comes first with no real underlying column to name-map to.
-      colnames = c("No.", "Last modified (UTC)", "Project", "Path", "Size"),
+      colnames = c("No.", "Last modified (UTC)", "Project", "File", "Size"),
       options = list(pageLength = 15, dom = "tip")
     )
   })
+  output$draft_table   <- render_archive_table(drafts_df)
+  output$publish_table <- render_archive_table(published_df)
 
-  output$download_history_item <- downloadHandler(
+  download_selected_handler <- function(get_df, rows_id) downloadHandler(
     filename = function() {
-      sel <- input$archive_history_table_rows_selected
+      sel <- input[[rows_id]]
       req(sel)
-      df <- archive_history_df()
+      df <- get_df()
       req(df)
       basename(df$s3_key[sel])
     },
     content = function(file) {
-      sel <- input$archive_history_table_rows_selected
+      sel <- input[[rows_id]]
       req(sel)
-      df <- archive_history_df()
+      df <- get_df()
       req(df)
       fetch_archive_from_s3(df$s3_key[sel], file)
     }
   )
+  output$download_draft_item   <- download_selected_handler(drafts_df, "draft_table_rows_selected")
+  output$download_publish_item <- download_selected_handler(published_df, "publish_table_rows_selected")
+
+  output$draft_tab_body <- renderUI({
+    if (!archive_history_enabled()) return(not_configured_card("Draft"))
+    card(
+      card_header(bsicons::bs_icon("pencil-square", class = "section-icon"), "Draft projects"),
+      card_body(
+        p(class = "muted", "Archives saved as drafts, newest first. Select one to download it, or move it to Publish once you're happy with it."),
+        DT::DTOutput("draft_table"),
+        div(class = "d-flex gap-2 mt-3",
+            downloadButton("download_draft_item", "Download selected", class = "btn-outline-primary btn-sm"),
+            actionButton("view_draft_report", tagList(bsicons::bs_icon("file-earmark-bar-graph"), " View report"), class = "btn-outline-primary btn-sm"),
+            actionButton("move_to_publish_btn", tagList(bsicons::bs_icon("send"), " Move to Publish"), class = "btn-primary btn-sm"),
+            actionButton("refresh_drafts", tagList(bsicons::bs_icon("arrow-repeat"), " Refresh"), class = "btn-outline-secondary btn-sm"))
+      )
+    )
+  })
+
+  output$publish_tab_body <- renderUI({
+    if (!archive_history_enabled()) return(not_configured_card("Publish"))
+    card(
+      card_header(bsicons::bs_icon("send-check", class = "section-icon"), "Ready to publish"),
+      card_body(
+        p(class = "muted", "Files in the Publish folder, ready to be sent to OBIS. Select one to download it."),
+        DT::DTOutput("publish_table"),
+        div(class = "d-flex gap-2 mt-3",
+            downloadButton("download_publish_item", "Download selected", class = "btn-outline-primary btn-sm"),
+            actionButton("view_publish_report", tagList(bsicons::bs_icon("file-earmark-bar-graph"), " View report"), class = "btn-outline-primary btn-sm"),
+            actionButton("refresh_publish", tagList(bsicons::bs_icon("arrow-repeat"), " Refresh"), class = "btn-outline-secondary btn-sm"))
+      )
+    )
+  })
+
+  # "View report": fetch the report that shares the selected zip's name and show it in a popup.
+  view_saved_report <- function(get_df, rows_id) {
+    sel <- input[[rows_id]]
+    df <- get_df()
+    if (length(sel) != 1 || is.null(df)) {
+      showNotification("Select a row in the table first.", type = "warning")
+      return()
+    }
+    dest <- tempfile(fileext = ".png")
+    found <- withProgress(message = "Loading report...", value = 0.5,
+                          tryCatch(fetch_report_for_zip(df$s3_key[sel], dest), error = function(e) e))
+    if (inherits(found, "error")) {
+      showNotification(paste0("Couldn't load the report: ", conditionMessage(found)), type = "error")
+    } else if (!isTRUE(found)) {
+      showNotification("No report was saved for this file (archives saved before reports existed don't have one).", type = "warning", duration = 8)
+    } else {
+      show_report_modal(dest, sub("\\.zip$", ".png", basename(df$s3_key[sel])))
+    }
+  }
+  observeEvent(input$view_draft_report,   { view_saved_report(drafts_df, "draft_table_rows_selected") })
+  observeEvent(input$view_publish_report, { view_saved_report(published_df, "publish_table_rows_selected") })
+
+  observeEvent(input$refresh_drafts,  { history_refresh(isolate(history_refresh()) + 1) })
+  observeEvent(input$refresh_publish, { history_refresh(isolate(history_refresh()) + 1) })
+
+  # Moving a draft to Publish always asks first, and remembers WHICH draft
+  # was chosen when the dialog opened (the table can refresh underneath it).
+  pending_move_key <- reactiveVal(NULL)
+
+  observeEvent(input$move_to_publish_btn, {
+    sel <- input$draft_table_rows_selected
+    df <- drafts_df()
+    if (length(sel) != 1 || is.null(df)) {
+      showNotification("Select a draft in the table first.", type = "warning")
+      return()
+    }
+    pending_move_key(df$s3_key[sel])
+    already <- tryCatch(publish_exists(df$project[sel]), error = function(e) FALSE)
+    showModal(modalDialog(
+      title = "Move to Publish?",
+      p("You're about to move ", tags$b(df$path[sel]), " out of Draft and into Publish as ",
+        tags$b(paste0(df$project[sel], "_CoreVersion.zip")), "."),
+      p("Once it's moved it no longer appears in Draft, and it will be sent to OBIS."),
+      if (already) div(class = "alert alert-warning",
+                        "A published version of ", tags$b(df$project[sel]), " already exists and will be replaced."),
+      footer = tagList(modalButton("Cancel"), actionButton("confirm_move_publish", "Yes, move to Publish", class = "btn-primary")),
+      easyClose = TRUE
+    ))
+  })
+
+  observeEvent(input$confirm_move_publish, {
+    key <- pending_move_key()
+    req(key)
+    removeModal()
+    pending_move_key(NULL)
+    res <- withProgress(message = "Moving to Publish...", value = 0.5,
+                        tryCatch(move_draft_to_publish(key), error = function(e) e))
+    if (inherits(res, "error")) {
+      showNotification(paste0("Move to Publish failed: ", conditionMessage(res)), type = "error", duration = NULL)
+      return()
+    }
+    history_refresh(isolate(history_refresh()) + 1)
+    if (isTRUE(res$draft_removed)) {
+      popup_tab("Publish")
+      showModal(success_modal(
+        "Moved to Publish successfully",
+        tagList("The draft is now in the Publish folder as ", tags$b(res$file_name), ".", tags$br(),
+                switch(res$report_status,
+                  moved  = tagList("Its report was renamed to ", tags$b(sub("\\.zip$", ".png", res$file_name)), ".", tags$br()),
+                  copied = tagList("Its report was copied to ", tags$b(sub("\\.zip$", ".png", res$file_name)), " (the old draft report couldn't be removed).", tags$br()),
+                  failed = tagList(span(class = "text-warning", "Its report could not be moved - it is still under the draft name in the Report folder."), tags$br()),
+                  NULL),
+                "It no longer appears in Draft and is ready to be sent to OBIS."),
+        "Publish", "View in Publish tab"))
+    } else {
+      showNotification(paste0("Published as ", res$file_name, ", but the draft could not be removed - delete it manually if you don't need it."),
+                       type = "warning", duration = NULL)
+    }
+  })
 
   observeEvent(input$back_to_6_from_7, { rv$current_step <- 6 })
 
@@ -1816,12 +2242,14 @@ server <- function(input, output, session) {
 
     updateTextInput(session, "project_id", value = "")
     updateTextInput(session, "sample_category_keep", value = "sample")
+    updateRadioButtons(session, "reference_db", selected = "curated")
 
     rv$validation   <- NULL
     rv$answers      <- list(georeference_sources = NA_character_, associated_sequences_uri = NA_character_)
     rv$build_result <- NULL
     rv$build_error  <- NULL
     rv$worms_result <- NULL
+    rv$taxonomy_rechecks <- 0
     rv$name_corrections <- character()
     rv$manual_aphia_overrides <- c()
     rv$qc_result    <- NULL

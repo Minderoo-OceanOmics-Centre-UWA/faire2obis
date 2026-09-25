@@ -129,6 +129,11 @@ app_css <- "
   body { background-color: #f9f9f7; }
   html, body { height: auto !important; overflow-y: auto !important; }
 
+  /* Sticky footer: the page container fills at least the viewport and the
+     footer's auto top margin pushes it to the bottom when content is short
+     (min-height, not height, so long pages still just grow and scroll). */
+  body > .container-fluid { min-height: 100vh; display: flex; flex-direction: column; }
+
   /* Subtle underwater scene behind the whole page (light rays, bubbles,
      seaweed) - fixed to the viewport (not the scrollable page), so it
      stays a constant, quiet backdrop rather than scrolling past. Very
@@ -201,7 +206,7 @@ app_css <- "
 
   .app-footer {
     background: linear-gradient(160deg, #04182f 0%, #0a3d62 45%, #0f7a8c 100%);
-    color: #cfe9ec; padding: 28px 36px; margin-top: 48px;
+    color: #cfe9ec; padding: 28px 36px; margin-top: auto; flex-shrink: 0;
     display: flex; flex-direction: column; align-items: center; gap: 6px;
     text-align: center; font-size: 0.82rem;
   }
@@ -345,6 +350,20 @@ ui <- page_fluid(
       });
       document.addEventListener('DOMContentLoaded', function() {
         document.querySelectorAll('input[type=file]').forEach(fixFileInputPosition);
+      });
+
+      // Step 2: grey out Continue (and show the hint) while an answer box has
+      // unchecked text. Retries briefly because the message can arrive in the
+      // same flush that (re)creates the buttons.
+      Shiny.addCustomMessageHandler('faire_step2_lock', function(msg) {
+        var tries = 0;
+        (function apply() {
+          var btn = document.getElementById('to_step3');
+          var hint = document.getElementById('step2_pending_hint');
+          if (!btn && tries++ < 20) { setTimeout(apply, 50); return; }
+          if (btn) btn.disabled = !!msg.blocked;
+          if (hint) hint.style.display = msg.pending ? '' : 'none';
+        })();
       });
     "))
   ),
@@ -576,6 +595,7 @@ server <- function(input, output, session) {
     ap_ids          = c(1),   # currently-visible Step 6 associated-party row ids (can go to zero - optional)
     next_ap_id      = 2,      # ever-increasing - ids are never reused
     validation      = NULL,
+    validated_answers = list(georeference_sources = NA_character_, associated_sequences_uri = NA_character_), # answers as of the last validation run - a box that differs from this has unchecked text in it
     answers         = list(georeference_sources = NA_character_, associated_sequences_uri = NA_character_),
     build_result    = NULL,   # list(event_core, controls, occurrence, dna_extension)
     build_error     = NULL,
@@ -847,7 +867,10 @@ server <- function(input, output, session) {
       incProgress(0.7)
     })
 
-    if (!is.null(rv$validation)) rv$current_step <- 2
+    if (!is.null(rv$validation)) {
+      rv$validated_answers <- rv$answers
+      rv$current_step <- 2
+    }
   })
 
   # =====================================================================
@@ -878,8 +901,38 @@ server <- function(input, output, session) {
           )
       ),
       if (isTRUE(rv$validation$any_blocking))
-        p(class = "muted", style = "text-align: right;", "Resolve the error(s) above before continuing.")
+        p(class = "muted", style = "text-align: right;", "Resolve the error(s) above before continuing."),
+      # Shown/hidden by the step2_pending observer below (not re-rendered
+      # here, so typing in a box never redraws the boxes and steals focus).
+      p(id = "step2_pending_hint", class = "muted", style = "text-align: right; display: none;",
+        "You've entered something that hasn't been checked - click Re-check to continue.")
     )
+  })
+
+  # Empty or normalised for comparing what's typed in an answer box against
+  # the value the last validation ran with.
+  norm_answer <- function(x) if (is.null(x) || length(x) == 0 || is.na(x[1])) "" else trimws(x[1])
+
+  # TRUE while any answer box holds text that differs from what the last
+  # Re-check/validation used. An untouched (or emptied back to blank) box
+  # is not pending, so users with nothing to enter can continue straight away.
+  step2_pending <- reactive({
+    req(rv$validation)
+    any(vapply(rv$validation$issues, function(issue) {
+      if (issue$fix_type != "config_question") return(FALSE)
+      typed <- input[[paste0("answer_", issue$id)]]
+      if (is.null(typed)) return(FALSE)
+      norm_answer(typed) != norm_answer(rv$validated_answers[[issue$field]])
+    }, logical(1)))
+  })
+
+  observe({
+    req(rv$validation, rv$current_step == 2)
+    blocked <- isTRUE(rv$validation$any_blocking) || isTRUE(step2_pending())
+    session$sendCustomMessage("faire_step2_lock", list(
+      blocked = blocked,
+      pending = !isTRUE(rv$validation$any_blocking) && isTRUE(step2_pending())
+    ))
   })
 
   render_issue_card <- function(issue) {
@@ -941,7 +994,7 @@ server <- function(input, output, session) {
           observeEvent(input[[paste0("save_", this_issue$id)]], {
             val <- input[[paste0("answer_", this_issue$id)]]
             rv$answers[[this_issue$field]] <- val
-            showNotification(paste0("Saved: ", this_issue$field), type = "message", duration = 2)
+            showNotification(paste0("Saved: ", this_issue$field, " - click Re-check to confirm"), type = "message", duration = 3)
           }, ignoreInit = TRUE)
         })
       }
@@ -949,6 +1002,15 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$revalidate, {
+    # Re-check re-draws the answer boxes from rv$answers, so anything typed
+    # but not yet saved would vanish (and the warning would stay). Save what
+    # is typed first so Re-check does what it looks like it does.
+    for (issue in rv$validation$issues) {
+      if (issue$fix_type == "config_question") {
+        typed <- input[[paste0("answer_", issue$id)]]
+        if (!is.null(typed)) rv$answers[[issue$field]] <- trimws(typed)
+      }
+    }
     withProgress(message = "Re-checking...", value = 0.3, {
       rv$validation <- validate_faire_files(
         input_files               = get_input_files(),
@@ -958,12 +1020,22 @@ server <- function(input, output, session) {
         reference_db              = input$reference_db,
         input_filenames           = get_input_filenames()
       )
+      rv$validated_answers <- rv$answers
       incProgress(0.7)
     })
   })
 
   observeEvent(input$back_to_1_from_2, { rv$current_step <- 1 })
-  observeEvent(input$to_step3, { rv$current_step <- 3 })
+  observeEvent(input$to_step3, {
+    # Server-side guard as well as the disabled button (which a stale page or
+    # a quick click could get past): unchecked text isn't what was validated.
+    if (isTRUE(rv$validation$any_blocking)) return()
+    if (isTRUE(step2_pending())) {
+      showNotification("You've entered something that hasn't been checked - click Re-check first.", type = "warning", duration = 8)
+      return()
+    }
+    rv$current_step <- 3
+  })
 
   # =====================================================================
   # STEP 3 - Build Core Files
@@ -2245,6 +2317,7 @@ server <- function(input, output, session) {
     updateRadioButtons(session, "reference_db", selected = "curated")
 
     rv$validation   <- NULL
+    rv$validated_answers <- list(georeference_sources = NA_character_, associated_sequences_uri = NA_character_)
     rv$answers      <- list(georeference_sources = NA_character_, associated_sequences_uri = NA_character_)
     rv$build_result <- NULL
     rv$build_error  <- NULL

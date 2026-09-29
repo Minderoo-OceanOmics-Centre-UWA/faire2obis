@@ -55,6 +55,7 @@ source("R/qc_checks.R")
 source("R/build_eml.R")
 source("R/eml_excel.R")
 source("R/archive_history.R")
+source("R/user_auth.R")
 
 # Converts a scientific name into a safe Shiny input-id fragment (no
 # spaces/punctuation) for the Step 4 per-name review widgets.
@@ -71,6 +72,23 @@ success_modal <- function(title, details, go_tab = NULL, go_label = NULL) {
     footer = div(class = "w-100 d-flex justify-content-center gap-2",
                  if (!is.null(go_tab)) actionButton("go_to_saved_tab", go_label, class = "btn-primary"),
                  modalButton("Close")),
+    size = "m", easyClose = TRUE
+  )
+}
+
+# Shown when a guest clicks Download / Save / Publish / Move to Publish -
+# those need an account, but the rest of the process doesn't. One shared
+# button id ("auth_prompt_login_btn"): its one observer (in server()) just
+# exits guest mode and shows the login screen, so it works the same
+# wherever this modal is opened from.
+login_required_modal <- function(action) {
+  modalDialog(
+    title = tagList(bsicons::bs_icon("lock-fill"), " Log in required"),
+    p(paste0("You need to log in to ", action, ". You can still go through the rest of the process as a guest.")),
+    p(class = "muted", "Not part of this organisation, or need access? Contact ",
+      tags$a(href = paste0("mailto:", contact_email()), contact_email()), "."),
+    footer = tagList(modalButton("Keep browsing as guest"),
+                      actionButton("auth_prompt_login_btn", "Log in now", class = "btn-primary")),
     size = "m", easyClose = TRUE
   )
 }
@@ -203,6 +221,32 @@ app_css <- "
   .btn-primary { font-weight: 600; }
   h4, h5 { font-weight: 700; letter-spacing: -0.01em; }
   .nav-row { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; }
+
+  /* Login/signup/forgot-password card - the one thing a visitor sees before
+     anything else, so it gets its own (more deliberate) look rather than
+     just reusing the plain default .card used everywhere else. */
+  .auth-wrap { min-height: calc(100vh - 250px); display: flex; align-items: center; justify-content: center; padding: 36px 16px; }
+  .auth-card { border: none; box-shadow: 0 2px 8px rgba(11,11,11,0.05), 0 16px 40px rgba(10,61,98,0.09); overflow: hidden; }
+  .auth-card:hover { transform: none; box-shadow: 0 2px 8px rgba(11,11,11,0.05), 0 16px 40px rgba(10,61,98,0.09); }
+  .auth-card .card-header {
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+    padding: 30px 24px 22px 24px; text-align: center; border-bottom: 1px solid #eceae4;
+  }
+  .auth-card .card-header .auth-icon {
+    width: 48px; height: 48px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(160deg, #0a3d62 0%, #14a3a3 100%); color: #fff; font-size: 1.35rem;
+  }
+  .auth-card .card-header .auth-title { font-size: 1.12rem; font-weight: 700; letter-spacing: -0.01em; color: #0b0b0b; }
+  .auth-card .card-body { padding: 28px 30px 30px 30px; }
+  .auth-card .form-label { font-weight: 600; font-size: 0.86rem; color: #0b0b0b; }
+  .auth-card .form-control { padding: 10px 14px; }
+  .auth-card .form-group, .auth-card > .card-body > div.form-group { margin-bottom: 16px; }
+  .auth-card a { color: #2a78d6; font-weight: 600; text-decoration: none; }
+  .auth-card a:hover { text-decoration: underline; }
+  .auth-guest-box {
+    margin-top: 22px; padding: 14px 16px; border-radius: 10px;
+    background: #f4f7f9; border: 1px solid #eceae4; font-size: 0.86rem; color: #63625c;
+  }
 
   .app-footer {
     background: linear-gradient(160deg, #04182f 0%, #0a3d62 45%, #0f7a8c 100%);
@@ -480,8 +524,25 @@ ui <- page_fluid(
         p("Convert FAIRe eDNA metabarcoding data into an OBIS-ready Darwin Core Archive")
       ),
       div(class = "header-spacer"),
-      actionButton("restart_app", tagList(bsicons::bs_icon("arrow-counterclockwise"), " Restart"),
-                   class = "btn btn-outline-light btn-sm restart-btn"),
+      conditionalPanel(
+        condition = "output.is_logged_in == true",
+        div(class = "d-flex align-items-center gap-2",
+            span(style = "font-size:0.78rem; color:#cfe9ec; opacity:0.9;", textOutput("logged_in_as", inline = TRUE)),
+            actionButton("logout_btn", tagList(bsicons::bs_icon("box-arrow-right"), " Log out"),
+                         class = "btn btn-outline-light btn-sm restart-btn"),
+            actionButton("restart_app", tagList(bsicons::bs_icon("arrow-counterclockwise"), " Restart"),
+                         class = "btn btn-outline-light btn-sm restart-btn")
+        )
+      ),
+      conditionalPanel(
+        condition = "output.is_guest == true",
+        div(class = "d-flex align-items-center gap-2",
+            span(style = "font-size:0.78rem; color:#cfe9ec; opacity:0.9;", bsicons::bs_icon("person"), " Browsing as guest"),
+            actionButton("guest_login_btn", "Log in", class = "btn btn-outline-light btn-sm restart-btn"),
+            actionButton("restart_app", tagList(bsicons::bs_icon("arrow-counterclockwise"), " Restart"),
+                         class = "btn btn-outline-light btn-sm restart-btn")
+        )
+      ),
 
       # Wave divider - blends the ocean-gradient header into the page's
       # light background below, a common "ocean site" section transition.
@@ -501,6 +562,20 @@ ui <- page_fluid(
   # OBIS), independent of wherever the wizard currently is. Each tab's
   # content lives in a dedicated uiOutput so switching tabs never disturbs
   # wizard state, the same reasoning as each step having its own renderUI.
+  # Auth gate: while output.app_visible is not TRUE (nobody logged in AND not
+  # browsing as a guest), only the login/signup form below is shown. A guest
+  # (rv$guest_mode) DOES see the real app - see the Step 7 / Draft tab
+  # button rendering for how download/save/publish are still gated
+  # per-action for a guest and per-role for a logged-in user; nothing in
+  # Step 1-6 needs gating, since those steps only affect this browser's own
+  # in-memory session, no shared state.
+  conditionalPanel(
+    condition = "output.app_visible != true",
+    div(class = "auth-wrap", div(style = "width: 100%; max-width: 440px;", uiOutput("auth_gate")))
+  ),
+
+  conditionalPanel(
+    condition = "output.app_visible == true",
   navset_tab(
     id = "main_tab",
     nav_panel(
@@ -562,6 +637,19 @@ ui <- page_fluid(
     nav_panel(
       "Publish",
       div(class = "content-wrap", uiOutput("publish_tab_body"))
+    ),
+    # Hidden/shown by an observer (see server) based on whether the logged-in
+    # user is an admin - starts hidden (nobody is logged in yet at page
+    # load). The uiOutput itself ALSO checks is_admin() server-side before
+    # rendering anything, as a second line of defence in case the tab is
+    # ever reached some other way (e.g. someone re-enables it via the
+    # browser console) - see the "visual gate isn't real security" note on
+    # the login overlay above; the same reasoning applies here.
+    nav_panel(
+      "User Management",
+      value = "User Management",
+      div(class = "content-wrap", uiOutput("user_mgmt_body"))
+    )
     )
   ),
 
@@ -585,6 +673,12 @@ ui <- page_fluid(
 server <- function(input, output, session) {
 
   rv <- reactiveValues(
+    logged_in       = FALSE,
+    logged_in_email = NULL,
+    guest_mode      = FALSE,  # browsing without logging in - can use the wizard (steps 1-6) but not download/save/publish
+    auth_view       = "login",  # login | signup | signup_verify | forgot | forgot_reset
+    auth_pending_email = NULL,  # email the verify/reset form is currently acting on
+    auth_message    = NULL,     # list(type = "success"/"error", text = "...") shown in the auth card
     current_step    = 1,
     assay_ids       = c(1),   # currently-visible assay row ids, in order added
     next_assay_id   = 2,      # ever-increasing - ids are never reused
@@ -606,6 +700,298 @@ server <- function(input, output, session) {
     qc_result       = NULL,  # run_qc_checks() output
     eml_xml         = NULL   # build_eml_xml() output (Step 6)
   )
+
+  # =====================================================================
+  # Login / signup / forgot password (R/user_auth.R has the actual logic -
+  # everything here is just the UI/wiring for it)
+  # =====================================================================
+  output$is_logged_in <- reactive({ isTRUE(rv$logged_in) })
+  outputOptions(output, "is_logged_in", suspendWhenHidden = FALSE)
+
+  output$is_guest <- reactive({ isTRUE(rv$guest_mode) && !isTRUE(rv$logged_in) })
+  outputOptions(output, "is_guest", suspendWhenHidden = FALSE)
+
+  # Gates the auth-screen-vs-real-app conditionalPanels: a logged-in user OR
+  # a guest sees the app; anyone else sees only the login/signup screen.
+  output$app_visible <- reactive({ isTRUE(rv$logged_in) || isTRUE(rv$guest_mode) })
+  outputOptions(output, "app_visible", suspendWhenHidden = FALSE)
+
+  observeEvent(input$auth_continue_guest, { rv$guest_mode <- TRUE })
+  # From the header's "Log in" button while browsing as a guest - returns to
+  # the login screen WITHOUT touching wizard progress (rv$current_step,
+  # rv$build_result, etc. are untouched, so logging in picks up where they
+  # left off).
+  observeEvent(input$guest_login_btn, { rv$guest_mode <- FALSE; auth_switch_view("login") })
+  # Shared "Log in now" button inside login_required_modal() - see its definition above.
+  observeEvent(input$auth_prompt_login_btn, {
+    removeModal()
+    rv$guest_mode <- FALSE
+    auth_switch_view("login")
+  })
+
+  output$logged_in_as <- renderText({
+    req(rv$logged_in_email)
+    paste0("Signed in as ", rv$logged_in_email)
+  })
+
+  auth_switch_view <- function(view, email = NULL, message = NULL) {
+    rv$auth_view <- view
+    rv$auth_pending_email <- email
+    rv$auth_message <- message
+  }
+
+  auth_message_box <- function() {
+    m <- rv$auth_message
+    if (is.null(m)) return(NULL)
+    div(class = if (identical(m$type, "success")) "alert alert-success" else "alert alert-danger",
+        m$text)
+  }
+
+  output$auth_gate <- renderUI({
+    icon_for_view <- switch(rv$auth_view,
+                             login = "box-arrow-in-right", signup = "person-plus",
+                             signup_verify = "envelope-check", forgot = "key",
+                             forgot_reset = "shield-lock")
+    card(
+      class = "auth-card",
+      card_header(
+        div(class = "auth-icon", bsicons::bs_icon(icon_for_view)),
+        div(class = "auth-title",
+            switch(rv$auth_view,
+                   login          = "Welcome back",
+                   signup         = "Create an account",
+                   signup_verify  = "Verify your email",
+                   forgot         = "Forgot password",
+                   forgot_reset   = "Reset your password"))
+      ),
+      card_body(
+        auth_message_box(),
+        switch(rv$auth_view,
+          login = tagList(
+            textInput("auth_login_email", "Email", placeholder = paste0("you@", allowed_email_domain())),
+            passwordInput("auth_login_password", "Password"),
+            div(class = "d-grid mt-2", actionButton("auth_login_submit", "Log in", class = "btn-primary")),
+            p(class = "muted mt-3 text-center",
+              actionLink("auth_goto_forgot", "Forgot password?"), " · ",
+              actionLink("auth_goto_signup", paste0("Create an account (@", allowed_email_domain(), " only)"))),
+            div(class = "auth-guest-box",
+                bsicons::bs_icon("person"), " ",
+                actionLink("auth_continue_guest", "Continue as a guest"), " - you can go through the whole process, ",
+                "but you'll need to log in to download, save, or publish the finished archive.")
+          ),
+          signup = tagList(
+            p(class = "muted", paste0("Only @", allowed_email_domain(), " email addresses can sign up - this tool is for internal use.")),
+            textInput("auth_signup_email", "Email", placeholder = paste0("you@", allowed_email_domain())),
+            passwordInput("auth_signup_password", "Password", placeholder = "At least 8 characters"),
+            passwordInput("auth_signup_password2", "Confirm password"),
+            div(class = "d-grid", actionButton("auth_signup_submit", "Send verification code", class = "btn-primary")),
+            p(class = "muted mt-3", "Already have an account? ", actionLink("auth_goto_login", "Log in")),
+            p(class = "muted", "Not part of this organisation, or need a different level of access? Contact ",
+              tags$a(href = paste0("mailto:", contact_email()), contact_email()), ".")
+          ),
+          signup_verify = tagList(
+            p(class = "muted", "Enter the 6-digit code sent to ", tags$b(rv$auth_pending_email), "."),
+            textInput("auth_verify_code", "Verification code", placeholder = "123456"),
+            div(class = "d-grid gap-2",
+                actionButton("auth_verify_submit", "Verify & finish", class = "btn-primary"),
+                actionButton("auth_verify_resend", "Re-send code", class = "btn-outline-secondary btn-sm")),
+            p(class = "muted mt-3", actionLink("auth_goto_login", "Back to login"))
+          ),
+          forgot = tagList(
+            p(class = "muted", "Enter your email and we'll send a reset code."),
+            textInput("auth_forgot_email", "Email", placeholder = paste0("you@", allowed_email_domain())),
+            div(class = "d-grid", actionButton("auth_forgot_submit", "Send reset code", class = "btn-primary")),
+            p(class = "muted mt-3", actionLink("auth_goto_login", "Back to login"))
+          ),
+          forgot_reset = tagList(
+            p(class = "muted", "Enter the code sent to ", tags$b(rv$auth_pending_email), " and choose a new password."),
+            textInput("auth_reset_code", "Reset code", placeholder = "123456"),
+            passwordInput("auth_reset_password", "New password", placeholder = "At least 8 characters"),
+            passwordInput("auth_reset_password2", "Confirm new password"),
+            div(class = "d-grid gap-2",
+                actionButton("auth_reset_submit", "Reset password", class = "btn-primary"),
+                actionButton("auth_reset_resend", "Re-send code", class = "btn-outline-secondary btn-sm")),
+            p(class = "muted mt-3", actionLink("auth_goto_login", "Back to login"))
+          )
+        )
+      )
+    )
+  })
+
+  observeEvent(input$auth_goto_login,  auth_switch_view("login"))
+  observeEvent(input$auth_goto_signup, auth_switch_view("signup"))
+  observeEvent(input$auth_goto_forgot, auth_switch_view("forgot"))
+
+  observeEvent(input$auth_login_submit, {
+    res <- attempt_login(input$auth_login_email, input$auth_login_password)
+    if (isTRUE(res$ok)) {
+      rv$logged_in <- TRUE
+      rv$logged_in_email <- tolower(trimws(input$auth_login_email))
+      rv$auth_message <- NULL
+    } else {
+      rv$auth_message <- list(type = "error", text = res$message)
+    }
+  })
+
+  observeEvent(input$auth_signup_submit, {
+    if (!identical(input$auth_signup_password, input$auth_signup_password2)) {
+      rv$auth_message <- list(type = "error", text = "Passwords don't match.")
+      return()
+    }
+    res <- withProgress(message = "Sending verification code...", value = 0.5,
+                         start_signup(input$auth_signup_email, input$auth_signup_password))
+    if (isTRUE(res$ok)) {
+      auth_switch_view("signup_verify", email = tolower(trimws(input$auth_signup_email)),
+                        message = list(type = "success", text = res$message))
+    } else {
+      rv$auth_message <- list(type = "error", text = res$message)
+    }
+  })
+
+  observeEvent(input$auth_verify_submit, {
+    req(rv$auth_pending_email)
+    res <- verify_signup_code(rv$auth_pending_email, input$auth_verify_code)
+    if (isTRUE(res$ok)) {
+      auth_switch_view("login", message = list(type = "success", text = res$message))
+    } else {
+      rv$auth_message <- list(type = "error", text = res$message)
+    }
+  })
+
+  observeEvent(input$auth_verify_resend, {
+    req(rv$auth_pending_email)
+    res <- withProgress(message = "Sending...", value = 0.5, resend_signup_code(rv$auth_pending_email))
+    rv$auth_message <- list(type = if (isTRUE(res$ok)) "success" else "error", text = res$message)
+  })
+
+  observeEvent(input$auth_forgot_submit, {
+    email <- tolower(trimws(input$auth_forgot_email))
+    res <- withProgress(message = "Sending...", value = 0.5, start_password_reset(email))
+    # start_password_reset() always returns ok = TRUE with the same generic
+    # message (see its own comment) so this form never reveals which emails
+    # have accounts.
+    auth_switch_view("forgot_reset", email = email, message = list(type = "success", text = res$message))
+  })
+
+  observeEvent(input$auth_reset_resend, {
+    req(rv$auth_pending_email)
+    res <- withProgress(message = "Sending...", value = 0.5, start_password_reset(rv$auth_pending_email))
+    rv$auth_message <- list(type = "success", text = res$message)
+  })
+
+  observeEvent(input$auth_reset_submit, {
+    req(rv$auth_pending_email)
+    if (!identical(input$auth_reset_password, input$auth_reset_password2)) {
+      rv$auth_message <- list(type = "error", text = "Passwords don't match.")
+      return()
+    }
+    res <- reset_password(rv$auth_pending_email, input$auth_reset_code, input$auth_reset_password)
+    if (isTRUE(res$ok)) {
+      auth_switch_view("login", message = list(type = "success", text = res$message))
+    } else {
+      rv$auth_message <- list(type = "error", text = res$message)
+    }
+  })
+
+  observeEvent(input$logout_btn, {
+    rv$logged_in <- FALSE
+    rv$logged_in_email <- NULL
+    auth_switch_view("login")
+  })
+
+  # =====================================================================
+  # User Management tab (admins only)
+  # =====================================================================
+  # Shows/hides the TAB ITSELF. Runs once at server start too (rv$logged_in
+  # is FALSE then), so the tab starts hidden before anyone logs in, not just
+  # after someone without admin logs in.
+  observe({
+    admin_now <- isTRUE(rv$logged_in) && is_admin(rv$logged_in_email)
+    if (admin_now) bslib::nav_show("main_tab", "User Management", session = session)
+    else bslib::nav_hide("main_tab", "User Management", session = session)
+  })
+
+  user_mgmt_refresh <- reactiveVal(0)
+
+  output$user_mgmt_body <- renderUI({
+    user_mgmt_refresh()
+    # Server-side check, not just the hidden tab - see the comment on the
+    # nav_panel definition above.
+    req(isTRUE(rv$logged_in), is_admin(rv$logged_in_email))
+
+    users_df <- list_users()
+    other_emails <- setdiff(users_df$email, tolower(trimws(rv$logged_in_email)))
+
+    role_row <- function(icon, name, access, cant) {
+      div(class = "assay-row",
+          div(class = "d-flex align-items-center gap-2", bsicons::bs_icon(icon), strong(name)),
+          tags$ul(style = "margin: 6px 0 0 0;",
+                  tags$li(tags$b("Can: "), access),
+                  if (!is.null(cant)) tags$li(tags$b("Can't: "), cant)))
+    }
+
+    tagList(
+      card(
+        card_header(bsicons::bs_icon("info-circle", class = "section-icon"), "What each role can do"),
+        card_body(
+          role_row("person", "Normal user (default for every new signup)",
+                    "Go through the whole process (Steps 1-7), download the archive, and save it to Draft.",
+                    "Move a draft into Publish, or publish directly from Step 7."),
+          role_row("send", "Publisher",
+                    "Everything a normal user can, plus: choose “Publish” in Step 7, and move a draft into Publish from the Draft tab.",
+                    "Manage accounts or change anyone's role."),
+          role_row("shield-lock", "Admin",
+                    "Everything a publisher can, plus: see this tab and change anyone else's role (except their own, and except a seed admin's - both are blocked here on purpose to prevent lockouts).",
+                    NULL),
+          div(class = "alert alert-info py-2 mt-2",
+              bsicons::bs_icon("info-circle-fill"), " ",
+              "Someone outside ", tags$b(paste0("@", allowed_email_domain())), " can't sign up at all - if they need access, point them to ",
+              tags$a(href = paste0("mailto:", contact_email()), contact_email()), ".")
+        )
+      ),
+      card(
+        card_header(bsicons::bs_icon("people", class = "section-icon"), "Accounts"),
+        card_body(
+          if (nrow(users_df) == 0) p(class = "muted", "No accounts yet.")
+          else DTOutput("user_mgmt_table"),
+          div(style = "text-align: right; margin-top: 10px;",
+              actionButton("user_mgmt_refresh_btn", tagList(bsicons::bs_icon("arrow-repeat"), " Refresh"), class = "btn-outline-secondary btn-sm"))
+        )
+      ),
+      card(
+        card_header(bsicons::bs_icon("person-gear", class = "section-icon"), "Change a role"),
+        card_body(
+          if (length(other_emails) == 0) {
+            p(class = "muted", "No other accounts to manage yet.")
+          } else {
+            tagList(
+              selectInput("user_mgmt_target_email", "Account", choices = other_emails),
+              radioButtons("user_mgmt_new_role", "New role",
+                           choices = c("Normal user" = "user", "Publisher" = "publisher", "Admin" = "admin"), inline = TRUE),
+              actionButton("user_mgmt_update_role", "Update role", class = "btn-primary")
+            )
+          }
+        )
+      )
+    )
+  })
+
+  output$user_mgmt_table <- renderDT({
+    user_mgmt_refresh()
+    req(isTRUE(rv$logged_in), is_admin(rv$logged_in_email))
+    datatable(list_users(), rownames = FALSE, options = list(pageLength = 15, dom = "tp"))
+  })
+
+  observeEvent(input$user_mgmt_update_role, {
+    req(isTRUE(rv$logged_in), is_admin(rv$logged_in_email))  # belt-and-braces: the tab is already hidden otherwise
+    res <- set_user_role(rv$logged_in_email, input$user_mgmt_target_email, input$user_mgmt_new_role)
+    showNotification(res$message, type = if (isTRUE(res$ok)) "message" else "error", duration = 6)
+    if (isTRUE(res$ok)) user_mgmt_refresh(user_mgmt_refresh() + 1)
+  })
+
+  observeEvent(input$user_mgmt_refresh_btn, {
+    user_mgmt_refresh(user_mgmt_refresh() + 1)
+  })
 
   # Bumped after any save/publish/move (or a Refresh click) to re-list the
   # Draft and Publish tables without requiring a manual page refresh.
@@ -1894,7 +2280,11 @@ server <- function(input, output, session) {
             if (!is.null(rv$eml_xml)) ", and eml.xml" else " (no eml.xml - go back to Step 6 to generate one)",
             " - ready to upload to an IPT."
           )),
-          downloadButton("download_archive", "Download archive (.zip)", class = "btn-primary")
+          if (isTRUE(rv$logged_in)) {
+            downloadButton("download_archive", "Download archive (.zip)", class = "btn-primary")
+          } else {
+            actionButton("download_archive_locked", tagList(bsicons::bs_icon("lock-fill"), " Download archive (.zip)"), class = "btn-primary")
+          }
         )
       ),
       card(
@@ -1902,7 +2292,12 @@ server <- function(input, output, session) {
         card_body(
           if (!archive_history_enabled()) {
             p(class = "muted", "Saving to Draft or Publish isn't available here (no AWS credentials set). You can still download the archive above.")
-          } else {
+          } else if (!isTRUE(rv$logged_in)) {
+            tagList(
+              p(class = "muted", "Log in to save this archive to Draft (or Publish, if you're a publisher)."),
+              actionButton("save_archive_locked", tagList(bsicons::bs_icon("lock-fill"), " Save"), class = "btn-primary")
+            )
+          } else if (can_publish(rv$logged_in_email)) {
             tagList(
               p(class = "muted", "Choose where this archive goes before you finish. You can review drafts later and publish them from the Draft tab."),
               radioButtons("archive_destination", NULL, selected = "draft",
@@ -1912,6 +2307,15 @@ server <- function(input, output, session) {
                   tagList(tags$b("Publish"), tags$br(), span(class = "muted", "Put it in the Publish folder as PROJECT_CoreVersion.zip, where it will be sent to OBIS."))
                 )),
               actionButton("save_archive_btn", tagList(bsicons::bs_icon("cloud-upload"), " Save"), class = "btn-primary"),
+              uiOutput("save_archive_status")
+            )
+          } else {
+            # Normal user: no "Publish" choice at all (not even disabled) -
+            # input$archive_destination simply won't exist, which the save
+            # observer below already treats as "draft" (its default branch).
+            tagList(
+              p(class = "muted", "Keep it as a draft, named with a timestamp. Nothing is sent to OBIS. Ask a publisher or admin to move it to Publish once it's ready."),
+              actionButton("save_archive_btn", tagList(bsicons::bs_icon("cloud-upload"), " Save as draft"), class = "btn-primary"),
               uiOutput("save_archive_status")
             )
           }
@@ -2026,9 +2430,13 @@ server <- function(input, output, session) {
       setwd(old_wd)
   }
 
+  observeEvent(input$download_archive_locked, { showModal(login_required_modal("download this archive")) })
+  observeEvent(input$save_archive_locked, { showModal(login_required_modal("save this archive")) })
+
   output$download_archive <- downloadHandler(
     filename = function() paste0("faire2obis_archive_", format(Sys.Date(), "%Y%m%d"), ".zip"),
     content = function(file) {
+      req(rv$logged_in)  # belt-and-braces: the UI already hides this behind login for a guest
       req(rv$build_result, rv$worms_result)
       build_archive_zip(file)
     }
@@ -2039,6 +2447,7 @@ server <- function(input, output, session) {
   output$save_archive_status <- renderUI(save_status())
 
   save_current_archive <- function(saver, label) {
+    req(rv$logged_in)  # belt-and-braces: the UI already hides this behind login
     zip_path <- tempfile(fileext = ".zip")
     on.exit(unlink(zip_path), add = TRUE)
     res <- withProgress(message = paste0(label, "..."), value = 0.4, {
@@ -2073,6 +2482,12 @@ server <- function(input, output, session) {
     }
 
     if (identical(input$archive_destination, "publish")) {
+      # Belt-and-braces: the UI doesn't even offer this choice to a
+      # non-publisher, but check again here in case of a forged input.
+      if (!isTRUE(rv$logged_in) || !can_publish(rv$logged_in_email)) {
+        showNotification("Publishing requires the publisher (or admin) role. Ask an admin in User Management.", type = "error", duration = 8)
+        return()
+      }
       already <- tryCatch(publish_exists(project), error = function(e) FALSE)
       showModal(modalDialog(
         title = "Publish this archive?",
@@ -2102,6 +2517,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$confirm_publish, {
     removeModal()
+    req(rv$logged_in, can_publish(rv$logged_in_email))  # belt-and-braces: see the same check above where this modal is opened
     res <- save_current_archive(publish_archive, "Publishing")
     if (!is.null(res)) {
       save_status(div(class = "alert alert-success mt-3",
@@ -2170,6 +2586,7 @@ server <- function(input, output, session) {
       basename(df$s3_key[sel])
     },
     content = function(file) {
+      req(rv$logged_in)  # belt-and-braces: the UI already hides this download link behind login
       sel <- input[[rows_id]]
       req(sel)
       df <- get_df()
@@ -2180,6 +2597,13 @@ server <- function(input, output, session) {
   output$download_draft_item   <- download_selected_handler(drafts_df, "draft_table_rows_selected")
   output$download_publish_item <- download_selected_handler(published_df, "publish_table_rows_selected")
 
+  # Shared by both tabs: a real downloadButton when logged in, or a locked
+  # placeholder (opens login_required_modal()) for a guest.
+  download_or_locked_btn <- function(real_id, locked_id, label) {
+    if (isTRUE(rv$logged_in)) downloadButton(real_id, label, class = "btn-outline-primary btn-sm")
+    else actionButton(locked_id, tagList(bsicons::bs_icon("lock-fill"), " ", label), class = "btn-outline-primary btn-sm")
+  }
+
   output$draft_tab_body <- renderUI({
     if (!archive_history_enabled()) return(not_configured_card("Draft"))
     card(
@@ -2187,10 +2611,18 @@ server <- function(input, output, session) {
       card_body(
         p(class = "muted", "Archives saved as drafts, newest first. Select one to download it, or move it to Publish once you're happy with it."),
         DT::DTOutput("draft_table"),
-        div(class = "d-flex gap-2 mt-3",
-            downloadButton("download_draft_item", "Download selected", class = "btn-outline-primary btn-sm"),
+        div(class = "d-flex gap-2 mt-3 flex-wrap",
+            download_or_locked_btn("download_draft_item", "download_draft_item_locked", "Download selected"),
             actionButton("view_draft_report", tagList(bsicons::bs_icon("file-earmark-bar-graph"), " View report"), class = "btn-outline-primary btn-sm"),
-            actionButton("move_to_publish_btn", tagList(bsicons::bs_icon("send"), " Move to Publish"), class = "btn-primary btn-sm"),
+            if (isTRUE(rv$logged_in) && can_publish(rv$logged_in_email)) {
+              actionButton("move_to_publish_btn", tagList(bsicons::bs_icon("send"), " Move to Publish"), class = "btn-primary btn-sm")
+            } else if (isTRUE(rv$logged_in)) {
+              tagList(actionButton("move_to_publish_btn_disabled", tagList(bsicons::bs_icon("send"), " Move to Publish"),
+                                    class = "btn-outline-secondary btn-sm", disabled = TRUE),
+                      span(class = "muted", style = "align-self: center;", "Publisher role required"))
+            } else {
+              actionButton("move_to_publish_locked", tagList(bsicons::bs_icon("lock-fill"), " Move to Publish"), class = "btn-primary btn-sm")
+            },
             actionButton("refresh_drafts", tagList(bsicons::bs_icon("arrow-repeat"), " Refresh"), class = "btn-outline-secondary btn-sm"))
       )
     )
@@ -2204,12 +2636,16 @@ server <- function(input, output, session) {
         p(class = "muted", "Files in the Publish folder, ready to be sent to OBIS. Select one to download it."),
         DT::DTOutput("publish_table"),
         div(class = "d-flex gap-2 mt-3",
-            downloadButton("download_publish_item", "Download selected", class = "btn-outline-primary btn-sm"),
+            download_or_locked_btn("download_publish_item", "download_publish_item_locked", "Download selected"),
             actionButton("view_publish_report", tagList(bsicons::bs_icon("file-earmark-bar-graph"), " View report"), class = "btn-outline-primary btn-sm"),
             actionButton("refresh_publish", tagList(bsicons::bs_icon("arrow-repeat"), " Refresh"), class = "btn-outline-secondary btn-sm"))
       )
     )
   })
+
+  observeEvent(input$download_draft_item_locked,   { showModal(login_required_modal("download a saved archive")) })
+  observeEvent(input$download_publish_item_locked, { showModal(login_required_modal("download a saved archive")) })
+  observeEvent(input$move_to_publish_locked,       { showModal(login_required_modal("move a draft to Publish")) })
 
   # "View report": fetch the report that shares the selected zip's name and show it in a popup.
   view_saved_report <- function(get_df, rows_id) {
@@ -2241,6 +2677,7 @@ server <- function(input, output, session) {
   pending_move_key <- reactiveVal(NULL)
 
   observeEvent(input$move_to_publish_btn, {
+    req(rv$logged_in, can_publish(rv$logged_in_email))  # belt-and-braces: the UI already hides this button otherwise
     sel <- input$draft_table_rows_selected
     df <- drafts_df()
     if (length(sel) != 1 || is.null(df)) {
@@ -2262,6 +2699,7 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$confirm_move_publish, {
+    req(rv$logged_in, can_publish(rv$logged_in_email))  # belt-and-braces: the UI already hides this behind login/role
     key <- pending_move_key()
     req(key)
     removeModal()

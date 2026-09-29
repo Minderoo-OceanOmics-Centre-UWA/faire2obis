@@ -1,0 +1,22 @@
+# Copy this file to .Renviron (same folder as app.R) and fill in real values.
+# .Renviron itself is gitignored - never commit real credentials.
+
+# --- S3 (Draft/Publish archive storage - see R/archive_history.R) ----------
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_DEFAULT_REGION=
+# Optional overrides (defaults are set in R/archive_history.R):
+# FAIRE2OBIS_S3_BUCKET=
+# FAIRE2OBIS_S3_PREFIX=
+
+# --- Login (signup/login/forgot-password - see R/user_auth.R) --------------
+# Gmail SMTP is used to send verification/reset codes. SMTP_USER is the
+# sending Gmail address; SMTP_PASSWORD is a 16-character Gmail APP PASSWORD
+# (Google Account -> Security -> 2-Step Verification -> App passwords),
+# NOT the account's normal login password.
+SMTP_USER=oceanomics.tech@gmail.com
+SMTP_PASSWORD=
+
+# Only email addresses ending in this domain can sign up. Defaults to
+# "uwa.edu.au" if left unset.
+ALLOWED_EMAIL_DOMAIN=uwa.edu.au

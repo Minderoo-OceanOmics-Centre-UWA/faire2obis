@@ -10,10 +10,21 @@ AWS_DEFAULT_REGION=
 # FAIRE2OBIS_S3_PREFIX=
 
 # --- Login (signup/login/forgot-password - see R/user_auth.R) --------------
-# Gmail SMTP is used to send verification/reset codes. SMTP_USER is the
-# sending Gmail address; SMTP_PASSWORD is a 16-character Gmail APP PASSWORD
-# (Google Account -> Security -> 2-Step Verification -> App passwords),
-# NOT the account's normal login password.
+# SMTP sends the verification/reset codes and the failed-login warning
+# email. Defaults to Gmail if SMTP_HOST/SMTP_PORT are left unset.
+#   Gmail (the default):    smtp.gmail.com : 587 - needs a Google "app
+#                            password" (Account -> Security -> 2-Step
+#                            Verification -> App passwords), NOT the
+#                            account's normal login password.
+#   Outlook.com/Hotmail:    smtp-mail.outlook.com : 587 - same idea, a
+#                            Microsoft "app password".
+#   Office 365 (UWA email): smtp.office365.com : 587 - Microsoft has been
+#                            disabling SMTP AUTH tenant-wide by default, so
+#                            this needs UWA IT to explicitly re-enable
+#                            "SMTP AUTH" for the sending mailbox first, or
+#                            every send fails with an authentication error.
+# SMTP_HOST=smtp.gmail.com
+# SMTP_PORT=587
 SMTP_USER=oceanomics.tech@gmail.com
 SMTP_PASSWORD=
 

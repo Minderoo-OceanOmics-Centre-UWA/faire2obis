@@ -43,6 +43,7 @@
 AUTH_S3_KEY   <- "auth/users.json"        # deliberately outside biodiversity-public/
 CODE_TTL_MINS <- 15                        # verification/reset codes expire after this long
 CODE_LENGTH   <- 6
+FAILED_LOGIN_WARNING_THRESHOLD <- 3        # wrong-password attempts before we email the account owner
 
 # Seed admin(s): ALWAYS treated as admin regardless of what's in the user
 # store (a hardcoded floor, not just a default), so an admin can never be
@@ -201,10 +202,25 @@ smtp_configured <- function() {
   nzchar(Sys.getenv("SMTP_USER")) && nzchar(Sys.getenv("SMTP_PASSWORD"))
 }
 
+#' SMTP host/port are configurable (SMTP_HOST/SMTP_PORT), defaulting to
+#' Gmail, so switching providers (e.g. to Outlook/Office 365) is an
+#' .Renviron change, not a code change:
+#'   Gmail:            smtp.gmail.com, 587 (the default - needs a Google
+#'                      "app password", not the account's normal password)
+#'   Outlook.com/Hotmail (personal): smtp-mail.outlook.com, 587 (same idea,
+#'                      a Microsoft "app password")
+#'   Office 365 (a UWA-managed mailbox): smtp.office365.com, 587 - BUT
+#'                      Microsoft has been disabling SMTP AUTH (basic auth
+#'                      with a password) tenant-wide by default; a UWA IT
+#'                      admin would need to explicitly re-enable "SMTP AUTH"
+#'                      for that specific mailbox first, or this fails with
+#'                      an authentication error no password change can fix.
+#'                      Not something to assume will just work the way
+#'                      Gmail's app password does.
 .smtp_server <- function() {
   emayili::server(
-    host     = "smtp.gmail.com",
-    port     = 587,
+    host     = if (nzchar(Sys.getenv("SMTP_HOST"))) Sys.getenv("SMTP_HOST") else "smtp.gmail.com",
+    port     = if (nzchar(Sys.getenv("SMTP_PORT"))) as.integer(Sys.getenv("SMTP_PORT")) else 587L,
     username = Sys.getenv("SMTP_USER"),
     password = Sys.getenv("SMTP_PASSWORD")
   )
@@ -223,6 +239,28 @@ send_code_email <- function(to, code, purpose = c("signup", "reset")) {
       "Enter this code in the app to ", action, ". ",
       "It expires in ", CODE_TTL_MINS, " minutes.\n\n",
       "If you didn't request this, you can ignore this email."
+    ))
+  smtp <- .smtp_server()
+  smtp(msg)
+  invisible(TRUE)
+}
+
+#' Sent once a login has failed FAILED_LOGIN_WARNING_THRESHOLD times in a row
+#' for an account - a side channel, not shown on the login form itself (the
+#' form's own message never changes, correct guess or not, so a failed
+#' attempt can't be used to find out whether a warning was just sent, which
+#' would itself leak whether the account exists).
+send_login_warning_email <- function(to) {
+  msg <- emayili::envelope() |>
+    emayili::from(Sys.getenv("SMTP_USER")) |>
+    emayili::to(to) |>
+    emayili::subject("FAIRe2OBIS - repeated failed login attempts") |>
+    emayili::text(paste0(
+      "Someone has tried to log in to your FAIRe2OBIS account with the wrong password, ",
+      "more than once.\n\n",
+      "If this was you and you've forgotten your password, use \"Forgot password\" on the login screen to reset it.\n\n",
+      "If this wasn't you, reset your password as a precaution.\n\n",
+      "Questions? Contact ", contact_email(), "."
     ))
   smtp <- .smtp_server()
   smtp(msg)
@@ -309,12 +347,33 @@ verify_signup_code <- function(email, code) {
 # ---------------------------------------------------------------------
 # Login
 # ---------------------------------------------------------------------
+#' Read-modify-write (not get_user()'s read-only) because a wrong password
+#' has to update failed_login_count, and a right one has to clear it.
 attempt_login <- function(email, password) {
   email <- tolower(trimws(email))
-  rec <- get_user(email)
+  users <- .load_users()
+  rec <- users[[email]]
   if (is.null(rec)) return(list(ok = FALSE, message = "Incorrect email or password."))
   if (!isTRUE(rec$verified)) return(list(ok = FALSE, message = "Please verify your email first (check your inbox for a code)."))
-  if (!verify_password(password, rec$password_hash)) return(list(ok = FALSE, message = "Incorrect email or password."))
+
+  if (!verify_password(password, rec$password_hash)) {
+    rec$failed_login_count <- (rec$failed_login_count %||% 0) + 1
+    users[[email]] <- rec
+    .save_users(users)
+    # Fires once per run of wrong attempts, not on every one after the
+    # threshold too - a fresh burst (after a successful login resets the
+    # count to 0) triggers it again.
+    if (identical(rec$failed_login_count, FAILED_LOGIN_WARNING_THRESHOLD)) {
+      tryCatch(send_login_warning_email(email), error = function(e) message("send_login_warning_email failed: ", conditionMessage(e)))
+    }
+    return(list(ok = FALSE, message = "Incorrect email or password."))
+  }
+
+  if (isTRUE(rec$failed_login_count > 0)) {
+    rec$failed_login_count <- 0
+    users[[email]] <- rec
+    .save_users(users)
+  }
   list(ok = TRUE, message = "Logged in.")
 }
 
@@ -340,6 +399,13 @@ start_password_reset <- function(email) {
   generic
 }
 
+#' Resetting a password via "Forgot password" also resets the account back
+#' to role "user" (a security measure the user asked for: a password reset
+#' is treated as an event that should require an admin to re-vet elevated
+#' access, whether it was a genuine self-service reset or a compromise
+#' being recovered from). Skipped for a seed admin - user_role() always
+#' overrides their role back to "admin" anyway, so touching the store would
+#' have no real effect and $role_was_reset would misleadingly say it did.
 reset_password <- function(email, code, new_password) {
   email <- tolower(trimws(email))
   if (is.null(new_password) || nchar(new_password) < 8) {
@@ -356,11 +422,19 @@ reset_password <- function(email, code, new_password) {
   if (!identical(hash_code(trimws(code)), rec$pending_code_hash)) {
     return(list(ok = FALSE, message = "Incorrect code."))
   }
+
+  role_before <- user_role(email)
+  is_seed <- email %in% ADMIN_SEED_EMAILS
+
   rec$password_hash <- hash_password(new_password)
   rec$pending_code_hash <- NULL
   rec$pending_code_expires <- NULL
   rec$pending_purpose <- NULL
+  rec$failed_login_count <- 0
+  if (!is_seed) rec$role <- "user"
   users[[email]] <- rec
   .save_users(users)
-  list(ok = TRUE, message = "Password reset - you can now log in.")
+
+  list(ok = TRUE, message = "Password reset - you can now log in.",
+       role_was_reset = !is_seed && !identical(role_before, "user"))
 }

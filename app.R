@@ -888,6 +888,15 @@ server <- function(input, output, session) {
     res <- reset_password(rv$auth_pending_email, input$auth_reset_code, input$auth_reset_password)
     if (isTRUE(res$ok)) {
       auth_switch_view("login", message = list(type = "success", text = res$message))
+      if (isTRUE(res$role_was_reset)) {
+        showModal(modalDialog(
+          title = tagList(bsicons::bs_icon("shield-exclamation"), " Access level reset"),
+          p("For security, resetting your password through “Forgot password” also resets your account back to ",
+            tags$b("Normal user"), " (download and save to Draft only)."),
+          p("If you need publisher or admin access again, ask an admin to restore it from User Management."),
+          footer = modalButton("Got it"), easyClose = TRUE
+        ))
+      }
     } else {
       rv$auth_message <- list(type = "error", text = res$message)
     }

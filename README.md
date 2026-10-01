@@ -101,6 +101,59 @@ install.packages(c("readxl", "dplyr", "tidyr", "readr", "tibble", "worrms", "rem
 remotes::install_github("iobis/obistools")
 ```
 
+Running the web app below also needs: `shiny`, `bslib`, `bsicons`, `DT`, `ggplot2`, `zip`, `openxlsx`, `scales`, `maps`, `xml2`, `base64enc`, `aws.s3`, `sodium`, `emayili`.
+
+## Web application
+
+The five scripts above are also wrapped in a guided Shiny web app (`app.R`), for running the pipeline step by step without hand-editing `config.R` — upload, validate, build, review taxonomy matches, run QC, fill in metadata, then download or save the finished archive.
+
+The app adds a few things the CLI scripts don't need:
+
+- **Accounts and roles.** Visitors can browse the whole process as a guest, but downloading, saving a draft, or publishing requires a UWA (`@uwa.edu.au`) account, verified by an emailed code. Three roles control what a signed-in account can do:
+
+  | Role | Can |
+  |---|---|
+  | **User** (default for every new signup) | Download the archive, save it to Draft |
+  | **Publisher** | Everything a user can, plus move a draft into Publish |
+  | **Admin** | Everything a publisher can, plus manage accounts and roles |
+
+- **Draft / Publish storage.** A built archive can be saved to an S3 bucket as a timestamped draft, or published as that project's canonical `<project>_CoreVersion.zip` — both reviewable later from the app's Draft and Publish tabs, without re-running the pipeline.
+
+Run it locally with:
+
+```r
+shiny::runApp()
+```
+
+It needs the environment variables below to actually save/publish or send login emails — without them, the app still runs, but those features are disabled rather than erroring.
+
+## Environment variables (`.Renviron`)
+
+The web app (not the CLI scripts, which don't need any of this) reads its configuration from an `.Renviron` file placed next to `app.R`. Copy `.Renviron.example` to `.Renviron` and fill in real values — `.Renviron` itself is gitignored, so credentials never get committed.
+
+**S3 — Draft/Publish archive storage** (see `R/archive_history.R`):
+
+| Variable | Required | What it's for |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` | Yes | AWS credentials for the bucket that stores saved Draft/Publish archives |
+| `AWS_SECRET_ACCESS_KEY` | Yes | — |
+| `AWS_DEFAULT_REGION` | Yes | e.g. `ap-southeast-2` |
+| `FAIRE2OBIS_S3_BUCKET` | No | Overrides the default bucket name |
+| `FAIRE2OBIS_S3_PREFIX` | No | Overrides the default `biodiversity-public` parent folder for `Draft/`/`Publish/`/`Report/` |
+
+**Email — account signup, login codes, and password resets** (see `R/user_auth.R`):
+
+| Variable | Required | What it's for |
+|---|---|---|
+| `SMTP_USER` | Yes | The sending email address (verification codes, reset codes, and the failed-login warning email all come from this address) |
+| `SMTP_PASSWORD` | Yes | An app password for that address — **not** its normal login password (Gmail: Account → Security → 2-Step Verification → App passwords) |
+| `SMTP_HOST` | No | Defaults to `smtp.gmail.com`; set this to switch providers (e.g. `smtp-mail.outlook.com`) |
+| `SMTP_PORT` | No | Defaults to `587` |
+| `ALLOWED_EMAIL_DOMAIN` | No | Defaults to `uwa.edu.au` — only addresses on this domain can sign up |
+| `SUPPORT_CONTACT_EMAIL` | No | Defaults to `oceanomics.tech@gmail.com` — shown to anyone outside the allowed domain, and in every "log in required" message |
+
+Without the S3 variables, Download still works but Draft/Publish saving is hidden. Without the SMTP variables, nobody can sign up, log in, or reset a password — the account system has no fallback for this, since there is no account system without email verification.
+
 ## Adapting this to your own project
 
 This repository ships pre-configured for one specific project's file layout. To reuse it for a different dataset, edit `config.R`:

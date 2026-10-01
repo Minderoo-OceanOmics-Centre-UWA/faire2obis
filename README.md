@@ -177,13 +177,25 @@ Also worth checking rather than assuming: which `sampleMetadata`/`taxaFinal` col
 
 This isn't a hypothetical pipeline — it's been run end-to-end against the OcOm_2408 project's real FAIRe files (three assays, 628 total samples) and checked with [`obistools`](https://github.com/iobis/obistools) before being considered done.
 
+*Charts below are drawn by the same code the web app uses for its own Step 7 analysis report (`R/build_report.R`) — not a separate look-alike, so the README can't quietly drift out of sync with what the app actually produces. Regenerate them after reprocessing a new dataset with `scripts/make_readme_charts.R`.*
+
 ### Samples
 
-![Samples collected: 490 real samples in the archive, 131 negative controls and 7 positive controls excluded](docs/img/samples_breakdown.png)
+![Samples in the archive: 490 real samples, 138 controls excluded](docs/img/samples_breakdown.png)
+
+490 real samples made it into the archive; 138 control samples (131 negative, 7 positive) were excluded as lab/field QC artifacts, not biodiversity occurrences.
 
 ### Detections per assay
 
 ![Detections per assay: 17,595 for 16SFishD, 32,234 for MarVer1, 18,600 for MiFishUE2](docs/img/detections_per_assay.png)
+
+### Sampling locations
+
+![Sampling locations: 98 distinct positions off the eastern Australian coast](docs/img/sampling_map.png)
+
+### Most-detected taxa
+
+![Ten most-detected taxa by total DNA sequence reads across all three assays](docs/img/top_taxa.png)
 
 ### Taxonomy resolved without guessing
 
@@ -199,6 +211,10 @@ This isn't a hypothetical pipeline — it's been run end-to-end against the OcOm
 | **Total** | **670** | **100% resolved · 0 left ambiguous · 0 unmatched** |
 
 Full audit trail, for review before publishing: `output/worms_match/matched_names.csv`, `ambiguous_resolved.csv`, `name_corrections_applied.csv`.
+
+That table is about matching *confidence* (did a name get a WoRMS ID at all). A related but different question is *how precisely* each detection could be identified in the first place — some ASVs only confidently resolve to genus or family, not species:
+
+![How far each detection was identified, by assay and taxonomic rank](docs/img/taxonomic_resolution.png)
 
 ### QC checks (`05_qc_checks.R`)
 

@@ -134,7 +134,10 @@ match_worms <- function(occurrence_tables,
           worms_status      = recs$status[1],
           worms_valid_name  = recs$valid_name[1],
           worms_rank        = recs$rank[1],
-          worms_isMarine    = recs$isMarine[1]
+          worms_isMarine    = recs$isMarine[1],
+          worms_isBrackish  = recs$isBrackish[1],
+          worms_isFreshwater  = recs$isFreshwater[1],
+          worms_isTerrestrial = recs$isTerrestrial[1]
         )
 
       } else {
@@ -154,7 +157,10 @@ match_worms <- function(occurrence_tables,
             worms_status      = chosen_row$status[1],
             worms_valid_name  = chosen_row$valid_name[1],
             worms_rank        = chosen_row$rank[1],
-            worms_isMarine    = chosen_row$isMarine[1]
+            worms_isMarine    = chosen_row$isMarine[1],
+            worms_isBrackish  = chosen_row$isBrackish[1],
+            worms_isFreshwater  = chosen_row$isFreshwater[1],
+            worms_isTerrestrial = chosen_row$isTerrestrial[1]
           )
           resolved_ambiguous[[queried_name]] <- recs %>%
             dplyr::mutate(queriedName = queried_name, chosenAphiaID = chosen_id, resolution = "manual_override") %>%
@@ -167,7 +173,10 @@ match_worms <- function(occurrence_tables,
             worms_status      = accepted_rows$status[1],
             worms_valid_name  = accepted_rows$valid_name[1],
             worms_rank        = accepted_rows$rank[1],
-            worms_isMarine    = accepted_rows$isMarine[1]
+            worms_isMarine    = accepted_rows$isMarine[1],
+            worms_isBrackish  = accepted_rows$isBrackish[1],
+            worms_isFreshwater  = accepted_rows$isFreshwater[1],
+            worms_isTerrestrial = accepted_rows$isTerrestrial[1]
           )
           resolved_ambiguous[[queried_name]] <- recs %>%
             dplyr::mutate(queriedName = queried_name, chosenAphiaID = accepted_rows$AphiaID[1], resolution = "single_accepted") %>%
@@ -207,6 +216,9 @@ match_worms <- function(occurrence_tables,
   matched_df <- dplyr::bind_rows(matched_rows)
   ambiguous_df <- if (length(ambiguous_names) > 0) dplyr::bind_rows(ambiguous_names) else tibble::tibble()
   resolved_ambiguous_df <- if (length(resolved_ambiguous) > 0) dplyr::bind_rows(resolved_ambiguous) else tibble::tibble()
+  # Anything WoRMS doesn't mark as marine is flagged, including brackish-only
+  # records (e.g. Albula glossodonta: isMarine = 0, isBrackish = 1). The user
+  # reviews each one in the app and accepts it - not decided by a rule here.
   non_marine_df <- if (nrow(matched_df) > 0) {
     matched_df %>% dplyr::filter(worms_isMarine == 0 | is.na(worms_isMarine))
   } else {

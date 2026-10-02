@@ -222,6 +222,12 @@ app_css <- "
   .assay-col-choice { font-size: 0.92rem; line-height: 1.45; }
   .assay-col-id { display: inline-block; font-size: 0.75rem; color: #6c757d; background: #f1f0ec; border-radius: 4px; padding: 0 6px; margin-right: 6px; }
   .assay-col-meta { display: flex; flex-direction: column; margin-top: 2px; }
+  .btn-white { --bs-btn-bg: #fff; }
+  .read-more-link { white-space: nowrap; text-decoration: none; font-weight: 500; }
+  .read-more-link:hover { text-decoration: underline; }
+  .read-more-link .read-more-chevron { margin-left: 3px; vertical-align: -1px; transition: transform 0.2s; }
+  .read-more-link[aria-expanded='true'] .read-more-chevron { transform: rotate(180deg); }
+  .read-more-link[aria-expanded='true'] .when-collapsed, .read-more-link[aria-expanded='false'] .when-expanded { display: none; }
   .muted { color: #898781; font-size: 0.86rem; }
   .stat-box { border: 1px solid #eceae4; border-radius: 10px; padding: 16px 18px; text-align: center; background: #fff; }
   .stat-box .stat-value { font-size: 1.6rem; font-weight: 700; color: #0b0b0b; }
@@ -706,7 +712,8 @@ server <- function(input, output, session) {
     taxonomy_rechecks  = 0,      # times "Apply & re-check" has been run on the current build
     name_corrections   = character(),  # user-entered corrections for unmatched names, this session
     manual_aphia_overrides = c(),      # user-chosen AphiaIDs for ambiguous names, this session
-    qc_result       = NULL,  # run_qc_checks() output
+    excluded_taxa   = character(),  # matched names the user excluded from the archive (likely contamination), this session
+    qc_result      = NULL,  # run_qc_checks() output
     eml_xml         = NULL   # build_eml_xml() output (Step 6)
   )
 
@@ -1583,6 +1590,7 @@ server <- function(input, output, session) {
       # fresh "run" prompt instead of a stale result from before.
       rv$worms_result <- NULL
       rv$taxonomy_rechecks <- 0
+      rv$excluded_taxa <- character()
       rv$qc_result     <- NULL
       showNotification("Build complete.", type = "message")
     }
@@ -1692,21 +1700,103 @@ server <- function(input, output, session) {
 
   observeEvent(input$run_worms, { run_worms_matching() })
 
-  show_taxon_modal <- function(query) {
+  # Names the user excluded in Step 4 (likely contamination) are removed
+  # here, by WoRMS ID, from the Occurrence tables and - via occurrenceID -
+  # the DNA Derived Data tables. Everything downstream (QC, mapping check,
+  # report, archive zip) reads these, never the unfiltered tables. Nothing
+  # is excluded unless the user clicks Exclude.
+  excluded_name_ids <- reactive({
+    r <- rv$worms_result
+    if (is.null(r) || length(rv$excluded_taxa) == 0 || nrow(r$matched_df) == 0) return(character())
+    ids <- r$matched_df$scientificNameID[r$matched_df$queriedName %in% rv$excluded_taxa]
+    unique(ids[!is.na(ids)])
+  })
+  final_occurrence <- reactive({
+    req(rv$worms_result)
+    ids <- excluded_name_ids()
+    occ <- rv$worms_result$occurrence_tables
+    if (length(ids) == 0) return(occ)
+    lapply(occ, function(o) o[!(o$scientificNameID %in% ids), , drop = FALSE])
+  })
+  final_dna <- reactive({
+    req(rv$build_result)
+    dna <- rv$build_result$dna_extension
+    if (length(excluded_name_ids()) == 0) return(dna)
+    occ <- final_occurrence()
+    setNames(lapply(names(dna), function(a) {
+      d <- dna[[a]]
+      if (is.null(occ[[a]])) d else d[d$occurrenceID %in% occ[[a]]$occurrenceID, , drop = FALSE]
+    }), names(dna))
+  })
+  # One sentence for the EML methods so data users know what was removed.
+  exclusion_method_note <- reactive({
+    if (length(rv$excluded_taxa) == 0 || is.null(rv$worms_result)) return(NULL)
+    n_removed <- sum(vapply(rv$worms_result$occurrence_tables, nrow, integer(1))) -
+                 sum(vapply(final_occurrence(), nrow, integer(1)))
+    n_taxa <- length(rv$excluded_taxa)
+    paste0("After manual review of taxa that WoRMS does not record as marine, ",
+           if (n_taxa == 1) "1 taxon was" else paste(n_taxa, "taxa were"), " excluded from the published occurrences as likely contamination or misidentification (",
+           format(n_removed, big.mark = ","), " occurrence records removed): ",
+           paste(sort(rv$excluded_taxa), collapse = ", "), ".")
+  })
+
+  exclude_button <- function(nm, size = "") {
+    tags$button(type = "button", class = paste("btn btn-outline-danger btn-white", size), `data-taxon` = nm,
+                title = "Click to exclude this taxon from the archive",
+                onclick = "Shiny.setInputValue('exclude_taxon', this.getAttribute('data-taxon'), {priority: 'event'})",
+                bsicons::bs_icon("x-circle"), " Exclude")
+  }
+  undo_exclude_button <- function(nm, size = "") {
+    tags$button(type = "button", class = paste("btn btn-outline-secondary btn-white", size), `data-taxon` = nm,
+                title = "Click to keep this taxon in the archive",
+                onclick = "Shiny.setInputValue('include_taxon', this.getAttribute('data-taxon'), {priority: 'event'})",
+                bsicons::bs_icon("arrow-counterclockwise"), " Undo")
+  }
+
+  # exclude_name: when set (a flagged non-marine name), the popup footer gets
+  # Exclude / Undo so the decision can be made right after reviewing it.
+  # extended: TRUE for the Check buttons (WoRMS, OBIS, FishBase/SeaLifeBase,
+  # GBIF, Wikipedia tabs); FALSE for the search box (WoRMS + FishBase only).
+  show_taxon_modal <- function(query, exclude_name = NULL, extended = TRUE) {
     query <- trimws(query %||% "")
     if (!nzchar(query)) {
       showNotification("Type a scientific name or an AphiaID first.", type = "warning")
       return()
     }
-    res <- withProgress(message = "Looking up in WoRMS...", value = 0.5, lookup_taxon(query))
+    res <- withProgress(message = "Looking up", value = 0, {
+      lookup_taxon_all(query, extended = extended, progress = function(detail) incProgress(0.25, detail = detail))
+    })
+    footer <- if (is.null(exclude_name)) {
+      modalButton("Close")
+    } else if (exclude_name %in% rv$excluded_taxa) {
+      tagList(span(class = "text-danger me-auto", bsicons::bs_icon("x-circle-fill"), " Excluded from the archive"),
+              undo_exclude_button(exclude_name), modalButton("Close"))
+    } else {
+      tagList(
+        span(class = "muted me-auto", "Kept unless you exclude it. Exclude only if it's likely contamination or a wrong match."),
+        exclude_button(exclude_name),
+        modalButton("Close")
+      )
+    }
     showModal(modalDialog(
       title = tagList(bsicons::bs_icon("search"), " ", query),
-      size = "xl", easyClose = TRUE, footer = modalButton("Close"),
+      size = "xl", easyClose = TRUE, footer = footer,
       taxon_lookup_body(res, query)
     ))
   }
   observeEvent(input$taxon_check, { show_taxon_modal(input$taxon_check) })
-  observeEvent(input$taxon_lookup_btn, { show_taxon_modal(input$taxon_query) })
+  observeEvent(input$taxon_lookup_btn, { show_taxon_modal(input$taxon_query, extended = FALSE) })
+  observeEvent(input$non_marine_check, { show_taxon_modal(input$non_marine_check, exclude_name = input$non_marine_check) })
+  # Changing what's excluded changes the data, so a QC result or eml.xml
+  # generated before it is stale - clear them, like a WoRMS re-run does.
+  set_excluded_taxa <- function(new) {
+    rv$excluded_taxa <- new
+    rv$qc_result <- NULL
+    rv$eml_xml <- NULL
+    removeModal()
+  }
+  observeEvent(input$exclude_taxon, { set_excluded_taxa(union(rv$excluded_taxa, input$exclude_taxon)) })
+  observeEvent(input$include_taxon, { set_excluded_taxa(setdiff(rv$excluded_taxa, input$include_taxon)) })
 
   output$step4_body <- renderUI({
     req(rv$build_result)
@@ -1745,7 +1835,7 @@ server <- function(input, output, session) {
               stat_box(n_auto, "Auto-resolved"),
               stat_box(length(ambiguous_names), "Need your review"),
               stat_box(length(unmatched_names), "Unmatched"),
-              stat_box(nrow(r$non_marine_df), "Flagged non-marine")
+              stat_box(nrow(r$non_marine_df), "Not marine in WoRMS")
           )
         )
       ),
@@ -1814,10 +1904,24 @@ server <- function(input, output, session) {
 
       if (nrow(r$non_marine_df) > 0) {
         card(
-          card_header(bsicons::bs_icon("flag", class = "section-icon"), "Flagged non-marine (review before publishing)"),
+          card_header(bsicons::bs_icon("flag", class = "section-icon"), "Not marine in WoRMS - review before publishing"),
           card_body(
-            p(class = "muted", "OBIS may drop these unless their marine status is confirmed correct - check WoRMS/IRMNG."),
-            tableOutput("non_marine_table")
+            div(class = "muted mb-3",
+                p(class = "mb-1", "These names are flagged because WoRMS doesn't record them as marine. ", strong("You can still publish them."), " ",
+                  tags$a(href = "#non_marine_more", class = "read-more-link", `data-bs-toggle` = "collapse", role = "button",
+                         `aria-expanded` = "false", `aria-controls` = "non_marine_more",
+                         span(class = "when-collapsed", "Read more"), span(class = "when-expanded", "Show less"),
+                         bsicons::bs_icon("chevron-down", class = "read-more-chevron"))),
+                div(id = "non_marine_more", class = "collapse",
+                  p(class = "mb-2 mt-1", "They may live in freshwater or on land, or WoRMS may not have a habitat recorded for them yet. They go to the IPT with the rest of the data, and OBIS decides what to do with each one. OBIS reports any quality issues back to the data provider if something needs clarifying."),
+                  p(class = "mb-1", strong("OBIS outcome"), " predicts what OBIS will do:"),
+                  tags$ul(class = "mb-2",
+                    tags$li(strong("Kept"), " - WoRMS records it as marine or brackish. Published normally."),
+                    tags$li(strong("Kept - marked unsure"), " - WoRMS has no marine or brackish record. Published, with a \"marine unsure\" flag."),
+                    tags$li(strong("Will be dropped"), " - WoRMS says it is neither marine nor brackish. Hidden from OBIS searches."))),
+                p(class = "mb-0 mt-2", strong("What to do:"), " click ", strong("Check"), " to see the taxon in WoRMS, OBIS, FishBase/SeaLifeBase, GBIF and Wikipedia. Everything is kept unless you click ",
+                  strong("Exclude"), ". Exclude only likely contamination or a wrong match, such as a land bird in a seawater sample. Exclusions are listed automatically in the eml.xml methods.")),
+            uiOutput("non_marine_table")
           )
         )
       },
@@ -1854,9 +1958,68 @@ server <- function(input, output, session) {
     )
   })
 
-  output$non_marine_table <- renderTable({
+  # Its own output (not part of step4_body) so excluding a name doesn't
+  # re-render the whole step and wipe the ambiguous/unmatched inputs.
+  output$non_marine_table <- renderUI({
     req(rv$worms_result)
-    rv$worms_result$non_marine_df %>% select(queriedName, worms_valid_name, worms_status, worms_rank)
+    nm_df <- rv$worms_result$non_marine_df
+    req(nrow(nm_df) > 0)
+    excluded <- rv$excluded_taxa
+
+    # Mirrors OBIS's own QC rule (iobis/obis-qc, obisqc/taxonomy.py): dropped
+    # only when WoRMS says marine = 0 AND brackish = 0; when neither is 1
+    # (e.g. both blank) it's kept with a MARINE_UNSURE flag.
+    obis_outcome <- function(row) {
+      m <- row$worms_isMarine; b <- row$worms_isBrackish
+      if (identical(as.numeric(m), 0) && identical(as.numeric(b), 0)) {
+        span(class = "badge bg-danger", "Will be dropped")
+      } else if (!(m %in% 1) && !(b %in% 1)) {
+        span(class = "badge bg-warning text-dark", title = "Published, with OBIS's MARINE_UNSURE flag", "Kept - marked unsure")
+      } else {
+        span(class = "badge bg-success-subtle text-success-emphasis", "Kept")
+      }
+    }
+    all_occ <- dplyr::bind_rows(lapply(rv$worms_result$occurrence_tables, function(o) o[, "scientificNameID", drop = FALSE]))
+    n_records <- function(id) sum(all_occ$scientificNameID %in% id)
+
+    habitat <- function(row) {
+      flags <- c(Marine = row$worms_isMarine, Brackish = row$worms_isBrackish,
+                 Freshwater = row$worms_isFreshwater, Terrestrial = row$worms_isTerrestrial)
+      on <- names(flags)[!is.na(flags) & flags == 1]
+      if (length(on) == 0) span(class = "muted", "not recorded")
+      else lapply(on, function(x) span(class = "badge bg-info-subtle text-info-emphasis me-1", x))
+    }
+    n_excluded <- sum(nm_df$queriedName %in% excluded)
+
+    tagList(
+      tags$table(class = "table align-middle",
+        tags$thead(tags$tr(tags$th("Name"), tags$th("Rank"), tags$th("WoRMS habitat"), tags$th("OBIS outcome"),
+                           tags$th(class = "text-end", "Records"), tags$th("In archive"), tags$th())),
+        tags$tbody(lapply(seq_len(nrow(nm_df)), function(i) {
+          row <- nm_df[i, ]
+          nm <- row$queriedName
+          is_excluded <- nm %in% excluded
+          tags$tr(class = if (is_excluded) "text-decoration-line-through text-muted",
+            tags$td(tags$em(nm),
+                    if (!identical(row$worms_valid_name, nm)) div(class = "muted small", "WoRMS: ", tags$em(row$worms_valid_name))),
+            tags$td(row$worms_rank),
+            tags$td(habitat(row)),
+            tags$td(obis_outcome(row)),
+            tags$td(class = "text-end", format(n_records(row$scientificNameID), big.mark = ",")),
+            tags$td(if (is_excluded) span(class = "badge bg-danger", "Excluded") else span(class = "badge bg-secondary-subtle text-secondary-emphasis", "Kept")),
+            tags$td(class = "text-end text-nowrap",
+              tags$button(type = "button", class = "btn btn-sm btn-outline-primary me-1", `data-taxon` = nm,
+                          title = "Open the WoRMS record and FishBase page",
+                          onclick = "Shiny.setInputValue('non_marine_check', this.getAttribute('data-taxon'), {priority: 'event'})",
+                          bsicons::bs_icon("search"), " Check"),
+              if (is_excluded) undo_exclude_button(nm, "btn-sm") else exclude_button(nm, "btn-sm"))
+          )
+        }))
+      ),
+      div(class = "muted",
+          if (n_excluded == 0) "Nothing excluded - all of these will be in the DwC archive."
+          else paste0(n_excluded, " of ", nrow(nm_df), " excluded. Their records are removed from the Occurrence and DNA Derived Data files, and listed in the eml.xml methods."))
+    )
   })
 
   observeEvent(input$apply_corrections, {
@@ -1908,7 +2071,7 @@ server <- function(input, output, session) {
     req(rv$build_result, rv$worms_result)
     withProgress(message = "Running QC checks...", value = 0.3, {
       result <- tryCatch(
-        run_qc_checks(rv$build_result$event_core, rv$worms_result$occurrence_tables, rv$build_result$dna_extension),
+        run_qc_checks(rv$build_result$event_core, final_occurrence(), final_dna()),
         error = function(e) {
           showNotification(paste("QC checks failed:", conditionMessage(e)), type = "error", duration = NULL)
           NULL
@@ -2248,7 +2411,7 @@ server <- function(input, output, session) {
 
     keywords <- trimws(strsplit(input$eml_keywords %||% "", ",")[[1]])
     abstract_paragraphs <- strsplit(input$eml_abstract %||% "", "\n")[[1]]
-    method_steps <- strsplit(input$eml_methods %||% "", "\n")[[1]]
+    method_steps <- c(strsplit(input$eml_methods %||% "", "\n")[[1]], exclusion_method_note())
 
     eml <- tryCatch(
       build_eml_xml(
@@ -2371,7 +2534,7 @@ server <- function(input, output, session) {
                 length(unique(r$ambiguous_df$queriedName)), length(r$unmatched_names))
     )
 
-    m <- tryCatch(check_dwc_mapping(rv$build_result$event_core, r$occurrence_tables, rv$build_result$dna_extension), error = function(e) NULL)
+    m <- tryCatch(check_dwc_mapping(rv$build_result$event_core, final_occurrence(), final_dna()), error = function(e) NULL)
     mapping <- if (is.null(m)) NULL else list(ok = sum(m$status %in% c("ok", "expected")), total = nrow(m),
                                               issues = sum(m$status %in% c("not_a_term", "wrong_type")))
     qc <- if (is.null(rv$qc_result)) NULL else list(
@@ -2388,7 +2551,7 @@ server <- function(input, output, session) {
       generated = Sys.time(),
       reference_db_label = names(REFERENCE_DB_CHOICES)[REFERENCE_DB_CHOICES == (input$reference_db %||% "curated")],
       event_core = rv$build_result$event_core, n_controls = nrow(rv$build_result$controls),
-      occurrence_tables = r$occurrence_tables, taxonomy_df = taxonomy_df, qc = qc, mapping = mapping
+      occurrence_tables = final_occurrence(), taxonomy_df = taxonomy_df, qc = qc, mapping = mapping
     )
   }
 
@@ -2444,11 +2607,13 @@ server <- function(input, output, session) {
       # since these files are meant to be uploaded individually into an
       # institutional IPT, which builds the real archive itself).
       write.csv(rv$build_result$event_core, file.path(tmpdir, "Event.csv"), row.names = FALSE, na = "")
-      for (a in names(rv$worms_result$occurrence_tables)) {
-        write.csv(rv$worms_result$occurrence_tables[[a]], file.path(tmpdir, paste0("Occurrence_", a, ".csv")), row.names = FALSE, na = "")
+      occ_final <- final_occurrence()
+      dna_final <- final_dna()
+      for (a in names(occ_final)) {
+        write.csv(occ_final[[a]], file.path(tmpdir, paste0("Occurrence_", a, ".csv")), row.names = FALSE, na = "")
       }
-      for (a in names(rv$build_result$dna_extension)) {
-        write.csv(rv$build_result$dna_extension[[a]], file.path(tmpdir, paste0("DNADerivedData_", a, ".csv")), row.names = FALSE, na = "")
+      for (a in names(dna_final)) {
+        write.csv(dna_final[[a]], file.path(tmpdir, paste0("DNADerivedData_", a, ".csv")), row.names = FALSE, na = "")
       }
       if (!is.null(rv$eml_xml)) {
         writeLines(rv$eml_xml, file.path(tmpdir, "eml.xml"))
@@ -2793,6 +2958,7 @@ server <- function(input, output, session) {
     rv$taxonomy_rechecks <- 0
     rv$name_corrections <- character()
     rv$manual_aphia_overrides <- c()
+    rv$excluded_taxa <- character()
     rv$qc_result    <- NULL
     rv$eml_xml      <- NULL
 

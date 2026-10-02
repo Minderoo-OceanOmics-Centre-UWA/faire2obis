@@ -46,7 +46,7 @@ The pipeline is five R scripts, run in order, plus a shared `config.R`. Each scr
 | `config.R` | Central configuration: input file paths, project ID, the assay↔projectMetadata-column mapping, output paths, and control-sample handling rules. Edit this first when adapting the pipeline to a new project. |
 | `01_build_event_core.R` | Reads `sampleMetadata` from every assay's FAIRe file, cross-checks that they agree on shared sample metadata (since it should be identical across assays), splits samples into real events vs. control samples, maps FAIRe/MIxS fields to Darwin Core Event/Location terms, and writes the single Event core. Control samples are written to a separate reference file, excluded from the published archive. |
 | `02_build_occurrence.R` | Reshapes each assay's OTU table (ASV × sample read-count matrix) into one row per non-zero detection, joins in taxonomy, and builds one Darwin Core Occurrence extension per assay. Handles low-confidence identifications by falling back to the lowest taxonomic rank that was actually resolved, rather than publishing a placeholder value as if it were a real name. |
-| `03_build_dna_extension.R` | Builds one DNA Derived Data extension per assay — the actual ASV/OTU sequence, PCR primer and amplicon details, sequencing platform, and bioinformatics pipeline metadata — linked to script 02's output via `occurrenceID`, and to the Event core via `eventID`. |
+| `03_build_dna_extension.R` | Builds one DNA Derived Data extension per assay — the actual ASV/OTU sequence, PCR primer and amplicon details, sequencing platform, and bioinformatics pipeline metadata — linked to script 02's output via `occurrenceID`, and to the Event core via `eventID`. See [PCR value conventions](#pcr-value-conventions) for how ranges are written. |
 | `04_worms_match.R` | Matches every scientific name produced by script 02 against the [World Register of Marine Species (WoRMS)](https://www.marinespecies.org/) to get a proper `scientificNameID`. Run as a deliberately separate, reviewable step — ambiguous or unmatched names are written to review files rather than guessed at, and only resolved automatically when doing so is unambiguous (e.g. picking WoRMS' own designated "accepted" record among several bookkeeping variants of the same name). |
 | `05_qc_checks.R` | Runs a battery of validation checks against the finished archive before it goes anywhere near a publishing tool: required-field completeness, date formatting, coordinate sanity (on land / out of range / zero), cross-file ID consistency between the Event core and every extension, and taxonomy-match coverage. |
 
@@ -80,6 +80,17 @@ output/
 
 Only the files in `event_core/`, `occurrence/`, and `dna_extension/` go into the published archive. `controls/` and `worms_match/` are working/audit output for your own review — negative and positive control samples are lab/field QC artifacts, not biodiversity occurrences, and don't belong in a public archive.
 
+### PCR value conventions
+
+Two DNA Derived Data terms are numeric in the GBIF definition but often hold more than one number in FAIRe sheets. The pipeline handles them like this:
+
+| Term | GBIF type | FAIRe value | Written as | Why |
+|---|---|---|---|---|
+| `ampliconSize` | integer | a range, e.g. `178-228` | `178 \| 228` | Follows [NOAA Omics' metabarcoding-assay guidance](https://github.com/NOAA-Omics/noaa-omics-metabarcoding-assays#assay-preps): *"A range can be entered separated by a bar"*. A combined assay gets its overall range (MiFish-U `163-185` + MiFish-E2 `163-212` → `163 \| 212`). |
+| `annealingTemp` | decimal | not one number, e.g. `54-56` for a touchdown PCR | left blank, and `annealingTemp recorded as 54-56 Celsius (not a single value)` added to `pcr_cond` | An average would be wrong for a touchdown PCR. Most OBIS metabarcoding datasets leave this blank and describe the profile in `pcr_cond`. |
+
+`ampliconSize` written as `min | max` is still off-spec for an integer term, so the IPT may flag it. The app's Darwin Core mapping check reports it as expected rather than as an error.
+
 ## Publishing
 
 This pipeline produces the files, not the archive itself — it deliberately targets a **generic IPT** upload rather than MDT, since MDT can't accommodate a multi-assay dataset. In IPT:
@@ -101,7 +112,7 @@ install.packages(c("readxl", "dplyr", "tidyr", "readr", "tibble", "worrms", "rem
 remotes::install_github("iobis/obistools")
 ```
 
-Running the web app below also needs: `shiny`, `bslib`, `bsicons`, `DT`, `ggplot2`, `zip`, `openxlsx`, `scales`, `maps`, `xml2`, `base64enc`, `aws.s3`, `sodium`, `emayili`.
+Running the web app below also needs: `shiny`, `bslib`, `bsicons`, `DT`, `ggplot2`, `zip`, `openxlsx`, `scales`, `maps`, `xml2`, `base64enc`, `aws.s3`, `sodium`, `emayili`. It also uses `curl` and `jsonlite`, which are installed with `worrms`.
 
 ## Web application
 
@@ -119,6 +130,27 @@ The app adds a few things the CLI scripts don't need:
 
 - **Draft / Publish storage.** A built archive can be saved to an S3 bucket as a timestamped draft, or published as that project's canonical `<project>_CoreVersion.zip` — both reviewable later from the app's Draft and Publish tabs, without re-running the pipeline.
 
+- **Assay mapping (Step 3).** Each uploaded assay has to be matched to its `projectMetadata` column(s) (`assay1`, `assay2`, … any number of columns). The app suggests a match and shows every column as a card (assay name, target gene, target taxa, primers) for you to tick or untick. Suggestions are made in this order:
+  1. `projectMetadata`'s own `assay_name` matches the file's assay name, ignoring case and punctuation (`MiFish-U` = `MiFishU`).
+  2. A combined assay is built from several columns' names (`MiFishUE2` → `MiFish-U` + `MiFishE2`). This works even when the same project also has separate `MiFishU` and `MiFishE2` files.
+  3. Otherwise, the single most similar column by primer or gene name.
+
+  Always check the suggestion before building.
+
+- **Not-marine review (Step 4).** After WoRMS matching, names WoRMS doesn't record as marine are listed with their WoRMS habitat, the number of records, and an **OBIS outcome**. This predicts what OBIS's own quality check ([`obis-qc`](https://github.com/iobis/obis-qc)) will do after publishing:
+
+  | OBIS outcome | When | What happens |
+  |---|---|---|
+  | Kept | WoRMS: marine or brackish | Published normally |
+  | Kept – marked unsure | WoRMS: no marine or brackish record (e.g. freshwater only) | Published, with a `MARINE_UNSURE` flag |
+  | Will be dropped | WoRMS: marine = no **and** brackish = no | Hidden from OBIS searches (still in the dataset download) |
+
+  The OBIS outcome is a review aid only and isn't written into the archive. OBIS publishes most of these taxa, and GBIF publishes all of them, so contamination has to be removed before upload:
+  - **Check** opens a popup with tabs for WoRMS, OBIS (its habitat flags, verdict and existing record counts), FishBase or SeaLifeBase (picked automatically: fish vs other animals), GBIF (classification, common name, habitat for any organism) and Wikipedia.
+  - **Exclude** removes that taxon from the Occurrence and DNA Derived Data files, and adds a sentence listing it to the `eml.xml` methods. Everything is kept unless you exclude it.
+
+  The Check popup calls public APIs (WoRMS, OBIS, GBIF, Wikipedia; no keys needed), so it needs internet access and takes a few seconds to open. If one service is down, only that tab is affected.
+
 Run it locally with:
 
 ```r
@@ -126,6 +158,24 @@ shiny::runApp()
 ```
 
 It needs the environment variables below to actually save/publish or send login emails — without them, the app still runs, but those features are disabled rather than erroring.
+
+**Local runs use the same S3 bucket as the live app.** Anything saved as a draft while testing is real and has to be deleted by hand.
+
+## Deployment
+
+The live app runs under [Shiny Server](https://posit.co/products/open-source/shiny-server/) on a Nectar Research Cloud VM (Pawsey region). The app folder on the server, `/srv/shiny-server/faire2obis`, is a git clone of this repository. To release a change:
+
+1. Commit and push to `main`.
+2. On the server:
+   ```bash
+   cd /srv/shiny-server/faire2obis
+   git pull
+   ```
+3. No restart is needed: new sessions pick up the new code. After CSS changes, hard-refresh the browser (Ctrl+F5).
+
+`.Renviron` is gitignored and was created on the server by hand, so `git pull` never touches it. Add any new environment variable there yourself. Install any new R package on the server so the `shiny` user can load it. If the app shows "Disconnected from server", check the newest log in `/var/log/shiny-server/`.
+
+The `rsconnect/` folder is an old shinyapps.io deploy record and isn't used.
 
 ## Environment variables (`.Renviron`)
 
@@ -160,7 +210,7 @@ This repository ships pre-configured for one specific project's file layout. To 
 
 - `INPUT_FILES` — path to each assay's FAIRe `.xlsx` file.
 - `PROJECT_ID`, `EVENT_CORE_SOURCE_ASSAY` — which assay's `sampleMetadata` is treated as the source of truth (script 01 cross-checks the others against it).
-- `ASSAY_PROJECT_COLUMN` — how your FAIRe files' assay names map to `projectMetadata`'s `assay1..assay4` columns. This is genuinely project-specific (which primer sets were run, and whether any were combined) — don't assume it carries over unchanged.
+- `ASSAY_PROJECT_COLUMN` — how your FAIRe files' assay names map to `projectMetadata`'s `assay1..assayN` columns. This is genuinely project-specific (which primer sets were run, and whether any were combined, e.g. MiFish-U + MiFish-E2 run as one `MiFishUE2` assay or as two separate assays) — don't assume it carries over unchanged. The web app suggests this mapping in Step 3 instead.
 - `SAMPLE_CATEGORY_KEEP` — the `samp_category` value that marks a real (non-control) sample.
 - `ASSOCIATED_SEQUENCES_URI` — a link/accession to where your raw sequence reads are archived (e.g. an ENA or SRA project accession). This pipeline doesn't auto-detect this; it comes from wherever your project deposited its raw reads.
 
@@ -171,6 +221,7 @@ Also worth checking rather than assuming: which `sampleMetadata`/`taxaFinal` col
 - **Never guess.** Ambiguous taxonomy matches, unresolved identifications, and missing metadata are surfaced for manual review, not silently filled in or defaulted.
 - **Taxonomy matching is a separate, reviewable step**, not baked into the core-building scripts — so a human can check ambiguous or unmatched names before they enter a published archive.
 - **Control samples never reach the published archive.**
+- **Removing a taxon is always a person's decision, and always recorded.** Nothing is excluded automatically. An excluded taxon is listed in the `eml.xml` methods, so data users know what was removed and why.
 - **Dates are never zero-padded** for unknown parts (e.g. `2011-03`, not `2011-03-00`) — a padded date asserts a day that was never actually recorded.
 
 ## Validated against real data

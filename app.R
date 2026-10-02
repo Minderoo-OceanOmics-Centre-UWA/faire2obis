@@ -213,6 +213,15 @@ app_css <- "
   .issue-card.warning { border-left-color: #fab219; }
 
   .assay-row { border: 1px solid #eceae4; border-radius: 10px; padding: 16px; margin-bottom: 12px; background: #fdfdfc; }
+  .assay-col-choices .shiny-options-group { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; margin-top: 10px; }
+  .assay-col-choices .checkbox { margin: 0; }
+  .assay-col-choices .checkbox label { display: flex; gap: 10px; align-items: flex-start; width: 100%; height: 100%; padding: 10px 12px;
+    border: 1px solid #e3e1da; border-radius: 8px; background: #fff; cursor: pointer; }
+  .assay-col-choices .checkbox label:has(input:checked) { border-color: #0d6efd; background: #f3f8ff; }
+  .assay-col-choices .checkbox input { margin-top: 4px; flex-shrink: 0; }
+  .assay-col-choice { font-size: 0.92rem; line-height: 1.45; }
+  .assay-col-id { display: inline-block; font-size: 0.75rem; color: #6c757d; background: #f1f0ec; border-radius: 4px; padding: 0 6px; margin-right: 6px; }
+  .assay-col-meta { display: flex; flex-direction: column; margin-top: 2px; }
   .muted { color: #898781; font-size: 0.86rem; }
   .stat-box { border: 1px solid #eceae4; border-radius: 10px; padding: 16px 18px; text-align: center; background: #fff; }
   .stat-box .stat-value { font-size: 1.6rem; font-weight: 700; color: #0b0b0b; }
@@ -1446,18 +1455,29 @@ server <- function(input, output, session) {
     req(!is.null(pm))
 
     assay_cols <- grep("^assay[0-9]+$", names(pm), value = TRUE)
-    preview_fields <- c("target_gene", "pcr_primer_name_forward", "pcr_primer_name_reverse")
+    preview_fields <- c(assay_name = "assay_name", target_gene = "target_gene",
+                        targetTaxonomicScope = "targetTaxonomicScope",
+                        forward = "pcr_primer_name_forward", reverse = "pcr_primer_name_reverse")
 
     preview <- lapply(assay_cols, function(col) {
-      vals <- vapply(preview_fields, function(f) {
-        row <- pm[pm$term_name == f, ]
-        if (nrow(row) == 0 || is.na(row[[col]][1]) || row[[col]][1] == "") "-" else as.character(row[[col]][1])
+      vapply(preview_fields, function(f) {
+        v <- project_meta_value(pm, f, col)
+        if (is.na(v)) "-" else v
       }, character(1))
-      paste0(names(vals), ": ", vals, collapse = "  |  ")
     })
     names(preview) <- assay_cols
     preview
   })
+
+  # One readable checkbox label per projectMetadata assay column.
+  assay_column_label <- function(col, vals) {
+    div(class = "assay-col-choice",
+        div(span(class = "assay-col-id", col), strong(vals[["assay_name"]])),
+        div(class = "assay-col-meta",
+            span(span(class = "muted", "Target gene: "), vals[["target_gene"]]),
+            span(span(class = "muted", "Taxa: "), vals[["targetTaxonomicScope"]]),
+            span(span(class = "muted", "Primers: "), vals[["forward"]], " / ", vals[["reverse"]])))
+  }
 
   output$step3_body <- renderUI({
     input_files <- get_input_files()
@@ -1491,10 +1511,11 @@ server <- function(input, output, session) {
                              bsicons::bs_icon("stars"), " Suggested - please verify")
                       }
                   ),
-                  selectizeInput(paste0("map_", assay), NULL,
-                                  choices = setNames(names(preview), paste0(names(preview), "  (", unlist(preview), ")")),
-                                  selected = suggested,
-                                  multiple = TRUE)
+                  div(class = "assay-col-choices",
+                      checkboxGroupInput(paste0("map_", assay), NULL, width = "100%",
+                                         choiceNames = unname(Map(assay_column_label, names(preview), preview)),
+                                         choiceValues = names(preview),
+                                         selected = suggested))
               )
             }))
           }

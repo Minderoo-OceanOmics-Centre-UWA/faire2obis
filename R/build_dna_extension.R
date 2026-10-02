@@ -27,6 +27,35 @@ get_project_term <- function(project_meta, term, assay_cols) {
   paste(unique(values), collapse = " | ")
 }
 
+#' Write ampliconSize the way NOAA Omics' metabarcoding-assay guidance does:
+#' a single integer, or a range as "min | max" (e.g. "140 | 160").
+#' github.com/NOAA-Omics/noaa-omics-metabarcoding-assays#assay-preps
+#' FAIRe sheets usually give ranges as "178-228"; a combined assay arrives
+#' here as "163-185 | 163-212" (one range per projectMetadata column), which
+#' becomes the overall span "163 | 212". Anything without a number is
+#' returned unchanged.
+format_amplicon_size <- function(x) {
+  if (is.na(x) || !nzchar(x)) return(x)
+  nums <- as.integer(regmatches(x, gregexpr("[0-9]+", x))[[1]])
+  if (length(nums) == 0) return(x)
+  if (min(nums) == max(nums)) as.character(nums[1]) else paste0(min(nums), " | ", max(nums))
+}
+
+#' annealingTemp is a GBIF decimal. A value that isn't one number (e.g.
+#' "54-56" for a touchdown PCR, or "60 | 54" for a combined assay) is left
+#' blank rather than averaged or guessed - the lab confirmed an average would
+#' be inaccurate - and the value as recorded is appended to pcr_cond so it
+#' isn't lost. Returns list(annealingTemp, pcr_cond).
+split_annealing_temp <- function(annealing_temp, pcr_cond) {
+  if (is.na(annealing_temp) || !nzchar(annealing_temp) ||
+      !is.na(suppressWarnings(as.numeric(annealing_temp)))) {
+    return(list(annealingTemp = annealing_temp, pcr_cond = pcr_cond))
+  }
+  note <- paste0("annealingTemp recorded as ", annealing_temp, " Celsius (not a single value)")
+  list(annealingTemp = NA_character_,
+       pcr_cond = if (is.na(pcr_cond) || !nzchar(pcr_cond)) note else paste0(pcr_cond, "; ", note))
+}
+
 #' Build one Darwin Core DNA Derived Data extension per assay.
 #'
 #' @param input_files Named list: assay name -> path to that assay's FAIRe .xlsx
@@ -71,6 +100,11 @@ build_dna_extension <- function(input_files, occurrence_tables, assay_project_co
       pcr_fields
     )
 
+    annealing <- split_annealing_temp(assay_meta$annealingTemp, assay_meta$pcr_cond)
+    if (is.na(annealing$annealingTemp) && !is.na(assay_meta$annealingTemp)) {
+      log_msg("  annealingTemp '", assay_meta$annealingTemp, "' is not a single value - left blank, recorded in pcr_cond instead")
+    }
+
     seq_meth <- paste(na.omit(c(assay_meta$platform, assay_meta$instrument)), collapse = " ")
     if (!is.na(assay_meta$seq_method_additional) && assay_meta$seq_method_additional != "") {
       seq_meth <- paste0(seq_meth, " (", assay_meta$seq_method_additional, ")")
@@ -113,7 +147,7 @@ build_dna_extension <- function(input_files, occurrence_tables, assay_project_co
         env_medium,
         target_gene                     = assay_meta$target_gene,
         target_subfragment              = assay_meta$target_subfragment,
-        ampliconSize                    = assay_meta$ampliconSize,
+        ampliconSize                    = format_amplicon_size(assay_meta$ampliconSize),
         pcr_primer_forward              = assay_meta$pcr_primer_forward,
         pcr_primer_reverse              = assay_meta$pcr_primer_reverse,
         pcr_primer_name_forward         = assay_meta$pcr_primer_name_forward,
@@ -122,9 +156,9 @@ build_dna_extension <- function(input_files, occurrence_tables, assay_project_co
           na.omit(c(assay_meta$pcr_primer_reference_forward, assay_meta$pcr_primer_reference_reverse)),
           collapse = " | "
         ),
-        pcr_cond                        = assay_meta$pcr_cond,
-        annealingTemp                   = assay_meta$annealingTemp,
-        annealingTempUnit               = "Celsius",
+        pcr_cond                        = annealing$pcr_cond,
+        annealingTemp                   = annealing$annealingTemp,
+        annealingTempUnit               = if (is.na(annealing$annealingTemp)) NA_character_ else "Celsius",
         amplificationReactionVolume     = assay_meta$amplificationReactionVolume,
         amplificationReactionVolumeUnit = "microliter",
         lib_layout                      = assay_meta$lib_layout,

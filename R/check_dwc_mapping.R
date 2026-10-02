@@ -39,6 +39,11 @@ DWC_EXPECTED_NON_TERMS <- list(
       vals <- unique(stats::na.omit(as.character(df[[col]])))
       vals <- vals[nzchar(vals)]
       pattern_ok <- if (term_type == "integer") grepl("^[+-]?[0-9]+$", vals) else !is.na(suppressWarnings(as.numeric(vals)))
+      if (col == "ampliconSize" && any(!pattern_ok) && all(pattern_ok | grepl("^[0-9]+ \\| [0-9]+$", vals))) {
+        return(data.frame(table = label, column = col, status = "expected",
+                          detail = paste0("Range written as \"min | max\" (e.g. \"", vals[!pattern_ok][1],
+                                          "\"), following NOAA Omics' metabarcoding-assay guidance. GBIF types this term as integer, so the IPT may still flag it.")))
+      }
       if (any(!pattern_ok)) {
         return(data.frame(table = label, column = col, status = "wrong_type",
                           detail = paste0("Must be ", term_type, " but found e.g. \"", vals[!pattern_ok][1], "\"")))
